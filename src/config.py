@@ -34,7 +34,7 @@ LLM_MODELS = [
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 GEMINI_MODELS = [
-    "gemini-2.5-pro",
+    "gemini-3.0-flash",
     "gemini-2.5-flash"
 ]
 
