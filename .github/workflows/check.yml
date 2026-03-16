@@ -2,8 +2,10 @@ name: iCourse Check
 
 on:
   schedule:
-    # Every day at 21:00 BTC (UTC + 8)
-    - cron: "0 13 * * *"
+    # 每天北京时间 12:35 触发 (UTC 04:35)
+    - cron: "35 4 * * *"
+    # 每天北京时间 18:05 触发 (UTC 10:05)
+    - cron: "5 10 * * *"
   workflow_dispatch:
 
 permissions:
