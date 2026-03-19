@@ -2,10 +2,12 @@ name: iCourse Check
 
 on:
   schedule:
-    # 每天北京时间 12:35 触发 (UTC 04:35)
-    - cron: "35 4 * * *"
-    # 每天北京时间 18:05 触发 (UTC 10:05)
-    - cron: "5 10 * * *"
+    # 每天北京时间 12:00 触发 (UTC 04:00)
+    - cron: "00 4 * * *"
+    # 每天北京时间 17:30 触发 (UTC 9:30)
+    - cron: "30 9 * * *"
+    # 每天北京时间 20:00 触发 (UTC 12:00)
+    - cron: "00 12 * * *"
   workflow_dispatch:
 
 permissions:
