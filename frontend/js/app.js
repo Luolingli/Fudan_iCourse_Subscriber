@@ -408,24 +408,27 @@ document.addEventListener("alpine:init", () => {
       var map = new Map();
       for (var i = 0; i < this.sortedCourses.length; i++) {
         var c = this.sortedCourses[i];
-        var key = (c[field] || fallback).trim() || fallback;
-        if (field === "term" && key !== fallback) {
-          var match = key.match(/^(\d{4})-(\d{4})([12])$/);
+        var rawKey = (c[field] || fallback).trim() || fallback;
+        var label = rawKey;
+        if (field === "term" && rawKey !== fallback) {
+          var match = rawKey.match(/^(\d{4})-(\d{4})(1|2|暑期)$/);
           if (match) {
-            key = match[3] === "1" ? match[1] + "秋季学期" : match[2] + "春季学期";
+            if (match[3] === "1") label = match[1] + "秋季学期";
+            else if (match[3] === "2") label = match[2] + "春季学期";
+            else label = match[2] + "暑期";
           }
         }
-        if (!map.has(key)) map.set(key, []);
-        map.get(key).push(c);
+        if (!map.has(rawKey)) map.set(rawKey, { rawKey: rawKey, label: label, courses: [] });
+        map.get(rawKey).courses.push(c);
       }
-      var groups = Array.from(map.entries()).map(function (entry) {
-        return { key: entry[0], label: entry[0], courses: entry[1] };
+      var groups = Array.from(map.values()).map(function (g) {
+        return { key: g.rawKey, label: g.label, courses: g.courses };
       });
       if (this.courseGroupMode === "term") {
         groups.sort(function (a, b) {
           if (a.label === fallback) return 1;
           if (b.label === fallback) return -1;
-          return String(b.label).localeCompare(String(a.label));
+          return String(b.key).localeCompare(String(a.key));
         });
       } else {
         groups.sort(function (a, b) {
