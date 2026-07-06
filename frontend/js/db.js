@@ -166,6 +166,8 @@ function _queryAll(sql, params) {
 function _getCourses() {
   return _queryAll(`
     SELECT c.course_id AS course_id, c.title AS title, c.teacher AS teacher,
+           (SELECT term FROM all_courses WHERE course_id = c.course_id ORDER BY term DESC LIMIT 1) AS term,
+           (SELECT dept FROM all_courses WHERE course_id = c.course_id ORDER BY term DESC LIMIT 1) AS dept,
            COUNT(CASE WHEN l.summary IS NOT NULL THEN 1 END) AS summary_count,
            COUNT(l.sub_id) AS total_count,
            MAX(l.processed_at) AS last_updated
