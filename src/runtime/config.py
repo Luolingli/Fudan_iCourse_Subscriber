@@ -1,4 +1,14 @@
 import os
+import socket
+
+# Force IPv4 resolution globally to prevent "Network is unreachable" socket errors
+# in environments (like GitHub Actions runners) that lack external IPv6 routing.
+_orig_getaddrinfo = socket.getaddrinfo
+def _patched_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if family == 0:
+        family = socket.AF_INET
+    return _orig_getaddrinfo(host, port, family, type, proto, flags)
+socket.getaddrinfo = _patched_getaddrinfo
 
 STUDENT_ID = os.environ.get("StuId", "")
 PASSWORD = os.environ.get("UISPsw", "")
@@ -112,12 +122,16 @@ def resolve_model_providers() -> list[dict]:
 DASHSCOPE_API_KEY = os.environ.get("DASHSCOPE_API_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# QQ SMTP
+# QQ SMTP (can be overridden for custom SMTP providers)
 SMTP_EMAIL = os.environ.get("SMTP_EMAIL", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL", "")
-SMTP_HOST = "smtp.qq.com"
-SMTP_PORT = 465
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.qq.com")
+try:
+    SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
+except ValueError:
+    SMTP_PORT = 465
+
 
 # Database & Storage
 DATA_DIR = os.environ.get("DATA_DIR", "data")
