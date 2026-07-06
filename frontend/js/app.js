@@ -281,7 +281,7 @@ document.addEventListener("alpine:init", () => {
     _subsSubscribedCache: [], _subsSingleRunCache: [], _subsDeptCache: [],
     _subsFilterTimer: null, _deptFilterTimer: null,
     subsSaving: false, subsError: "",
-    singleRunTriggering: false,
+    singleRunTriggering: false, checkTriggering: false,
     singleRunUseOfficial: false,
     /* Per-browser pinned-courses set, lazily synced to localStorage. */
     starred: _loadStarred(),
@@ -387,6 +387,59 @@ document.addEventListener("alpine:init", () => {
         if (sa !== sb) return sa - sb;
         return 0;  // preserve SQL order within each group
       });
+    },
+    get sortedCourses() {
+      // Return flat array, ordered by starred then last_updated
+      return [...this.courses].sort((a, b) => {
+        const starA = this.isStarred(a.course_id);
+        const starB = this.isStarred(b.course_id);
+        if (starA && !starB) return -1;
+        if (!starA && starB) return 1;
+        return 0;  // preserve SQL order within each group
+      });
+    },
+    get courseGroups() {
+      if (this.courseGroupMode === "all") {
+        return [{ key: "all", label: "全部课程", courses: this.sortedCourses }];
+      }
+      var field = this.courseGroupMode === "term" ? "term" : "dept";
+      var fallback = this.courseGroupMode === "term" ? "未标注学期" : "未标注模块";
+      var map = new Map();
+      for (var i = 0; i < this.sortedCourses.length; i++) {
+        var c = this.sortedCourses[i];
+        var key = (c[field] || fallback).trim() || fallback;
+        if (!map.has(key)) map.set(key, []);
+        map.get(key).push(c);
+      }
+      var groups = Array.from(map.entries()).map(function (entry) {
+        return { key: entry[0], label: entry[0], courses: entry[1] };
+      });
+      if (this.courseGroupMode === "term") {
+        groups.sort(function (a, b) {
+          if (a.label === fallback) return 1;
+          if (b.label === fallback) return -1;
+          return String(b.label).localeCompare(String(a.label));
+        });
+      } else {
+        groups.sort(function (a, b) {
+          if (a.label === fallback) return 1;
+          if (b.label === fallback) return -1;
+          return String(a.label).localeCompare(String(b.label), "zh-Hans-CN");
+        });
+      }
+      return groups;
+    },
+    setCourseGroupMode(mode) {
+      this.courseGroupMode = mode;
+    },
+    isCourseFolderOpen(key) {
+      return this.courseFolderOpen[key] !== false;
+    },
+    toggleCourseFolder(key) {
+      this.courseFolderOpen = {
+        ...this.courseFolderOpen,
+        [key]: !this.isCourseFolderOpen(key),
+      };
     },
     goBack() {
       const p = this._history.pop();
@@ -1003,6 +1056,31 @@ document.addEventListener("alpine:init", () => {
         this.subsError = e?.message || "触发失败";
       } finally {
         this.singleRunTriggering = false;
+      }
+    },
+    async runCheckWorkflow() {
+      if (this.checkTriggering) return;
+      var creds = _loadCreds();
+      if (!creds?.token) {
+        this.subsError = "未登录或 PAT 缺失。";
+        return;
+      }
+      this.checkTriggering = true;
+      this.subsError = "";
+      try {
+        await ICS.github.triggerCheckWorkflow(
+          this.repoOwner, this.repoName, "main", creds.token,
+          {
+            resummarizeAll: this.singleRunResummarizeAll,
+            continueUntilDone: this.singleRunContinueUntilDone,
+          },
+        );
+        var mode = "订阅检查";
+        this._toast("已触发" + mode + "。请到 Actions 查看进度", "success");
+      } catch (e) {
+        this.subsError = e?.message || "触发失败";
+      } finally {
+        this.checkTriggering = false;
       }
     },
 

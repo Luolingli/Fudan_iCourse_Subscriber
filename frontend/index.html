@@ -258,30 +258,71 @@
       <p class="text-sm">Make sure the workflow has run at least once.</p>
     </div>
 
+    <div x-show="courses.length > 0" class="flex items-center gap-1 bg-gray-100 rounded-lg p-1 mb-3">
+      <button @click="setCourseGroupMode('all')"
+              class="flex-1 px-3 py-1.5 rounded-md text-sm font-medium transition-colors"
+              :class="courseGroupMode === 'all' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'">
+        全部
+      </button>
+      <button @click="setCourseGroupMode('term')"
+              class="flex-1 px-3 py-1.5 rounded-md text-sm font-medium transition-colors"
+              :class="courseGroupMode === 'term' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'">
+        学期
+      </button>
+      <button @click="setCourseGroupMode('dept')"
+              class="flex-1 px-3 py-1.5 rounded-md text-sm font-medium transition-colors"
+              :class="courseGroupMode === 'dept' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'">
+        模块
+      </button>
+    </div>
+
     <!-- Course cards -->
     <div class="space-y-3">
-      <template x-for="c in courses" :key="c.course_id">
-        <button @click="openCourse(c.course_id)"
-                class="w-full text-left bg-white rounded-xl shadow-sm border border-gray-100 p-4 hover:shadow-md transition-shadow active:bg-gray-50">
-          <div class="flex items-start justify-between gap-3">
-            <div class="min-w-0 flex items-start gap-2">
-              <span @click.stop="toggleStar(c.course_id)"
-                      class="flex-shrink-0 mt-0.5 text-lg leading-none cursor-pointer select-none"
-                      :class="isStarred(c.course_id) ? 'text-amber-400' : 'text-gray-300 hover:text-amber-400'"
-                      :title="isStarred(c.course_id) ? '取消置顶' : '置顶'"
-                      x-text="isStarred(c.course_id) ? '★' : '☆'"></span>
-              <div class="min-w-0">
-                <h3 class="font-semibold text-gray-800 truncate" x-text="c.title"></h3>
-                <p class="text-sm text-gray-500 mt-0.5" x-text="c.teacher"></p>
-              </div>
+      <template x-for="group in courseGroups" :key="group.key">
+        <section>
+          <button x-show="courseGroupMode !== 'all'"
+                  @click="toggleCourseFolder(group.key)"
+                  class="w-full flex items-center justify-between bg-white border border-gray-100 rounded-lg px-3 py-2 text-left shadow-sm hover:bg-gray-50">
+            <div class="min-w-0 flex items-center gap-2">
+              <span class="text-lg leading-none" x-text="isCourseFolderOpen(group.key) ? '▾' : '▸'"></span>
+              <span class="text-lg leading-none">▣</span>
+              <span class="font-semibold text-gray-700 truncate" x-text="group.label"></span>
             </div>
-            <div class="flex flex-col items-end flex-shrink-0">
-              <span class="text-xs font-medium bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full"
-                    x-text="c.summary_count + ' summaries'"></span>
-              <span class="text-xs text-gray-400 mt-1" x-text="relTime(c.last_updated)"></span>
-            </div>
+            <span class="text-xs text-gray-400" x-text="group.courses.length + '门'"></span>
+          </button>
+
+          <div x-show="courseGroupMode === 'all' || isCourseFolderOpen(group.key)"
+               class="space-y-3"
+               :class="courseGroupMode === 'all' ? '' : 'mt-2 ml-3 pl-3 border-l border-gray-100'">
+            <template x-for="c in group.courses" :key="c.course_id">
+              <button @click="openCourse(c.course_id)"
+                      class="w-full text-left bg-white rounded-xl shadow-sm border border-gray-100 p-4 hover:shadow-md transition-shadow active:bg-gray-50">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="min-w-0 flex items-start gap-2">
+                    <span @click.stop="toggleStar(c.course_id)"
+                            class="flex-shrink-0 mt-0.5 text-lg leading-none cursor-pointer select-none"
+                            :class="isStarred(c.course_id) ? 'text-amber-400' : 'text-gray-300 hover:text-amber-400'"
+                            :title="isStarred(c.course_id) ? '取消置顶' : '置顶'"
+                            x-text="isStarred(c.course_id) ? '★' : '☆'"></span>
+                    <div class="min-w-0">
+                      <h3 class="font-semibold text-gray-800 truncate" x-text="c.title"></h3>
+                      <p class="text-sm text-gray-500 mt-0.5">
+                        <span x-text="c.teacher"></span>
+                        <span x-show="courseGroupMode !== 'term' && c.term" class="text-gray-400"> · <span x-text="c.term"></span></span>
+                        <span x-show="courseGroupMode !== 'dept' && c.dept" class="text-gray-400"> · <span x-text="c.dept"></span></span>
+                      </p>
+                    </div>
+                  </div>
+                  <div class="flex flex-col items-end flex-shrink-0">
+                    <span class="text-xs font-medium bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full"
+                          x-text="c.summary_count + ' summaries'"></span>
+                    <span class="text-xs text-gray-400 mt-1" x-text="relTime(c.last_updated)"></span>
+                  </div>
+                </div>
+              </button>
+            </template>
           </div>
-        </button>
+        </section>
       </template>
     </div>
   </div>
@@ -702,27 +743,36 @@
            class="text-sm text-red-600 bg-red-50 rounded-lg p-3 mt-3"></p>
 
         <!-- Action buttons -->
-        <div class="mt-4 flex items-center justify-between gap-2">
+        <div class="mt-4 flex flex-col md:flex-row md:items-center md:justify-between gap-2">
           <button @click="saveSubscriptions()" :disabled="subsSaving"
                   class="px-5 py-2.5 bg-blue-500 text-white rounded-lg text-sm font-medium hover:bg-blue-600 disabled:opacity-50 flex items-center gap-2">
             <div x-show="subsSaving" class="spinner !w-4 !h-4 !border-2 !border-white/30 !border-t-white"></div>
             <span x-text="subsSaving ? '加密上传中…' : '保存订阅到 Secret'"></span>
           </button>
-          <label class="flex items-center gap-1.5 cursor-pointer select-none"
-                 :class="singleRunIds.length === 0 ? 'opacity-40' : ''">
-            <input type="checkbox" x-model="singleRunUseOfficial"
-                   :disabled="singleRunIds.length === 0"
-                   class="w-3.5 h-3.5 rounded border-gray-300 text-emerald-500 focus:ring-emerald-400">
-            <span class="text-xs text-gray-500">官方字幕</span>
-          </label>
-          <button @click="runSingleRunWorkflow()" :disabled="singleRunTriggering || singleRunIds.length === 0"
-                  class="px-5 py-2.5 bg-emerald-500 text-white rounded-lg text-sm font-medium hover:bg-emerald-600 disabled:opacity-50 flex items-center gap-2">
-            <div x-show="singleRunTriggering" class="spinner !w-4 !h-4 !border-2 !border-white/30 !border-t-white"></div>
-            <span x-text="singleRunTriggering ? '触发中…' : '▶ 单次运行'"></span>
-          </button>
+          <div class="flex flex-col sm:flex-row items-center gap-3 md:gap-2 mt-2 md:mt-0">
+            <button @click="runCheckWorkflow()" :disabled="checkTriggering"
+                    class="px-5 py-2.5 bg-indigo-500 text-white rounded-lg text-sm font-medium hover:bg-indigo-600 disabled:opacity-50 flex items-center justify-center gap-2">
+              <div x-show="checkTriggering" class="spinner !w-4 !h-4 !border-2 !border-white/30 !border-t-white"></div>
+              <span x-text="checkTriggering ? '触发中…' : '运行订阅检查'"></span>
+            </button>
+            <div class="flex items-center gap-2">
+              <label class="flex items-center gap-1.5 cursor-pointer select-none"
+                     :class="singleRunIds.length === 0 ? 'opacity-40' : ''">
+                <input type="checkbox" x-model="singleRunUseOfficial"
+                       :disabled="singleRunIds.length === 0"
+                       class="w-3.5 h-3.5 rounded border-gray-300 text-emerald-500 focus:ring-emerald-400">
+                <span class="text-xs text-gray-500">官方字幕</span>
+              </label>
+              <button @click="runSingleRunWorkflow()" :disabled="singleRunTriggering || singleRunIds.length === 0"
+                      class="px-5 py-2.5 bg-emerald-500 text-white rounded-lg text-sm font-medium hover:bg-emerald-600 disabled:opacity-50 flex items-center justify-center gap-2">
+                <div x-show="singleRunTriggering" class="spinner !w-4 !h-4 !border-2 !border-white/30 !border-t-white"></div>
+                <span x-text="singleRunTriggering ? '触发中…' : '▶ 单次运行'"></span>
+              </button>
+            </div>
+          </div>
         </div>
         <p class="text-xs text-gray-400 mt-1">
-          单次运行会触发 workflow 处理选中课程，结果发送到 RECEIVER_EMAIL。
+          订阅检查使用已保存的 COURSE_IDS；单次运行只处理右侧篮子课程。结果发送到 RECEIVER_EMAIL。
           保存需要 GitHub PAT 具备 <strong>Secrets: Read and write</strong> 权限。
         </p>
       </div>
