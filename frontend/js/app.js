@@ -248,6 +248,7 @@ document.addEventListener("alpine:init", () => {
     view: "loading", error: null, loadingMsg: "",
     toast: null, toastType: "success",
     courses: [], lectures: [],
+    courseGroupMode: "term", courseFolderOpen: {},
     currentCourse: null, currentLecture: null,
     currentPptPages: [],
     detailView: "summary",
@@ -408,6 +409,12 @@ document.addEventListener("alpine:init", () => {
       for (var i = 0; i < this.sortedCourses.length; i++) {
         var c = this.sortedCourses[i];
         var key = (c[field] || fallback).trim() || fallback;
+        if (field === "term" && key !== fallback) {
+          var match = key.match(/^(\d{4})-(\d{4})([12])$/);
+          if (match) {
+            key = match[3] === "1" ? match[1] + "秋季学期" : match[2] + "春季学期";
+          }
+        }
         if (!map.has(key)) map.set(key, []);
         map.get(key).push(c);
       }
