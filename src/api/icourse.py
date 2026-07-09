@@ -27,7 +27,7 @@ def _extract_date_from_sub(sub_title: str) -> str | None:
     return m.group(1) if m else None
 
 def fetch_ppt_image(client: "ICourseClient", item: dict,
-                    max_attempts: int = 2, timeout: int = 30) -> bytes | None:
+                    max_attempts: int = 5, timeout: int = 45) -> bytes | None:
     """Download a single PPT image. Returns bytes or None on persistent failure.
 
     Module-level (not a method on ICourseClient) so worker threads in the
@@ -48,7 +48,7 @@ def fetch_ppt_image(client: "ICourseClient", item: dict,
             print(f"[PPTFetcher] download failed (attempt "
                   f"{attempt}/{max_attempts}): {type(e).__name__}: {e}")
             if attempt < max_attempts:
-                time.sleep(1)
+                time.sleep(2)
     return None
 
 
