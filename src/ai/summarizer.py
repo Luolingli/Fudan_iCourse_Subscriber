@@ -130,6 +130,40 @@ class Summarizer:
             )
         return result
 
+    def _chunk_content(self, content: str, max_len: int = 25000) -> list[str]:
+        if len(content) <= max_len:
+            return [content]
+        parts = []
+        cur = []
+        cur_len = 0
+        for line in content.split('\n'):
+            # If a single line is incredibly long, we might still exceed max_len
+            # but usually transcripts are broken by timestamps/newlines.
+            if cur_len + len(line) > max_len and cur:
+                parts.append('\n'.join(cur))
+                cur = [line]
+                cur_len = len(line)
+            else:
+                cur.append(line)
+                cur_len += len(line)
+        if cur:
+            parts.append('\n'.join(cur))
+        return parts
+
+    def _call_llm_chunked(self, client: OpenAI, model: str, title: str, content: str) -> str:
+        chunks = self._chunk_content(content, max_len=25000)
+        if len(chunks) == 1:
+            return self._call_llm(client, model, title, chunks[0])
+
+        summaries = []
+        for i, chunk in enumerate(chunks):
+            print(f"[Summarizer] Processing chunk {i+1}/{len(chunks)} ({len(chunk)} chars) ...")
+            part_title = f"{title} (第 {i+1}/{len(chunks)} 部分)"
+            res = self._call_llm(client, model, part_title, chunk)
+            summaries.append(res)
+            
+        return "\n\n---\n\n".join(summaries)
+
     def summarize(self, title: str, content: str) -> tuple[str, str]:
         """Summarize lecture, trying providers in MODEL_PROVIDERS order.
 
@@ -147,7 +181,7 @@ class Summarizer:
             for model in provider["models"]:
                 model_id = f"{provider['name']}/{model}"
                 try:
-                    result = self._call_llm(client, model, title, content)
+                    result = self._call_llm_chunked(client, model, title, content)
                     return (result, model_id)
                 except Exception as e:
                     print(f"[Summarizer] {model_id} failed: "
