@@ -303,10 +303,11 @@ def run():
     email_items: list = []
 
     # Refresh the semester catalog: run on the 5th and 25th of each month,
-    # or immediately if the database has no catalog data yet.
+    # immediately if the database has no catalog data yet, or when forced
+    # via FORCE_CRAWL (manual workflow_dispatch).
     has_catalog = db.has_all_courses()
     today = datetime.datetime.now().day
-    if not has_catalog or today in (5, 25):
+    if not has_catalog or today in (5, 25) or config.FORCE_CRAWL:
         _crawl_semester_catalog(client, db, reporter)
     else:
         reporter.info("Skipping catalog crawl (has data, not the 5th or 25th).")

@@ -195,3 +195,7 @@ COURSE_IDS = [
 # 保留此变量仅用于兼容老部署环境，新部署无需设置。
 # 例：CRAWL_TERM=25
 CRAWL_TERM = os.environ.get("CRAWL_TERM", "").strip()
+
+# 强制本次运行刷新学期目录（不受每月 5/25 号限制）。
+# 例：FORCE_CRAWL=true
+FORCE_CRAWL = os.environ.get("FORCE_CRAWL", "").strip().lower() in ("1", "true", "yes")

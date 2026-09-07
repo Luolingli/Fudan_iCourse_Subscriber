@@ -6,6 +6,12 @@ on:
     # 设计这个奇怪的时间是为了避免整点时的github队列峰值，避免排队过久。
     - cron: "36 11 * * *"
   workflow_dispatch:
+    inputs:
+      force_crawl:
+        description: "Force a semester catalog crawl (normally only on the 5th/25th)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -168,6 +174,7 @@ jobs:
           UISPsw: ${{ secrets.UISPSW }}
           COURSE_IDS: ${{ secrets.COURSE_IDS }}
           CRAWL_TERM: ${{ secrets.CRAWL_TERM }}
+          FORCE_CRAWL: ${{ github.event.inputs.force_crawl == 'true' }}
           SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
