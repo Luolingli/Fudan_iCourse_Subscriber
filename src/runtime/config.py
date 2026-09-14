@@ -42,9 +42,11 @@ MODEL_PROVIDERS: list[dict] = [
         "default_base_url": "https://api-inference.modelscope.cn/v1/",
         "models": [
             "deepseek-ai/DeepSeek-V4-Pro",
-            # 注意：deepseek-ai/DeepSeek-V4-Flash 在 ModelScope 有模型页但
-            # 没有推理 provider（恒 400 "has no provider supported"），
-            # 2026-09-14 线上验证后移除，勿加回。
+            "deepseek-ai/DeepSeek-V4-Pro-0813",
+            "Qwen/Qwen3.5-397B-A17B",
+            # 注意：ModelScope 上"有模型页但无推理 provider"的模型会恒 400
+            # （如 DeepSeek-V4-Flash、MiniMax-M3、Tencent-Hunyuan/Hy3 实测空响应），
+            # 加模型前必须先冒烟验证。2026-09-14。
         ],
     },
     {
