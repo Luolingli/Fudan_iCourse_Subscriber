@@ -107,7 +107,17 @@ class Summarizer:
         )
         if not response.choices:
             raise ValueError("API returned empty choices — likely content filter or quota exceeded")
-        result = response.choices[0].message.content
+        choice = response.choices[0]
+        result = choice.message.content
+        # 推理模型可能把全部 token 花在 reasoning 上，或 provider 在
+        # 配额/错误路径上返回 200 但 content 为空。空内容若被当作成功
+        # 会写入一条空总结并标记该节完成，故必须显式失败以触发兜底。
+        if result is None or not result.strip():
+            raise ValueError(
+                f"API returned empty content (finish_reason="
+                f"{getattr(choice, 'finish_reason', '?')}) — likely "
+                "content filter, quota exceeded, or reasoning exhausted"
+            )
         elapsed = time.time() - t0
         # Token usage helps explain run cost — every provider's billing is
         # token-based, and rate-limit decisions key off prompt size much

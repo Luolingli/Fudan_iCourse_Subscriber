@@ -42,7 +42,9 @@ MODEL_PROVIDERS: list[dict] = [
         "default_base_url": "https://api-inference.modelscope.cn/v1/",
         "models": [
             "deepseek-ai/DeepSeek-V4-Pro",
-            "deepseek-ai/DeepSeek-V4-Flash"
+            # 注意：deepseek-ai/DeepSeek-V4-Flash 在 ModelScope 有模型页但
+            # 没有推理 provider（恒 400 "has no provider supported"），
+            # 2026-09-14 线上验证后移除，勿加回。
         ],
     },
     {
@@ -51,7 +53,8 @@ MODEL_PROVIDERS: list[dict] = [
         "base_url_env": "DEEPSEEK_BASE_URL",
         "default_base_url": "https://api.deepseek.com/v1",
         "models": [
-            "deepseek-v4-flash"
+            "deepseek-v4-pro",
+            "deepseek-flash",
         ],
     },
     # {
