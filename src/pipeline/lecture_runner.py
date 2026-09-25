@@ -145,12 +145,29 @@ class LectureRunner:
             self._ppt.prefetch_and_ocr(self._client, next_course, next_sub)
 
         # ── Phase F — bucketed-prompt LLM summary ──────────────────────
+        # An empty transcript is a failure, not a terminal state: it can
+        # come from a broken or flaky ASR pass.  Never mark_processed here
+        # — enumeration filters on processed_at, so that would make the
+        # lecture permanently un-retryable with no summary ("No Content").
+        # If PPT OCR still yielded text, summarize from that alone;
+        # otherwise record an error so the lecture is retried next run and
+        # abandoned only once error_count hits the retry cap.
         if not transcript.strip():
-            self._reporter.info("    Empty transcript, skipping summary.")
-            self._release_audio(sub_id)
-            self._db.mark_processed(sub_id)
-            self._db.clear_error(sub_id)
-            return None
+            if self._db.get_done_ppt_pages(sub_id):
+                self._reporter.info(
+                    "    Empty transcript — summarizing from PPT text only."
+                )
+            else:
+                self._reporter.info(
+                    "    No usable content (empty transcript, no PPT "
+                    "text) — will retry next run."
+                )
+                self._release_audio(sub_id)
+                self._db.update_error(
+                    sub_id, "transcribe",
+                    "empty transcript and no usable PPT text",
+                )
+                return None
 
         summary = self._summarize(
             sub_id, course_title, transcript, transcript_segments,
@@ -233,8 +250,13 @@ class LectureRunner:
         first segment (head truncation), between segments, and — when a
         duration hint is known (the last PPT screenshot offset, a lower
         bound on lecture length) — after the last segment (tail
-        truncation)."""
+        truncation).  Also requires at least one non-empty segment — a
+        timing-complete transcript whose ASR text is all empty must fall
+        back to local ASR instead of being persisted as an empty
+        transcript (which would short-circuit the retry)."""
         if not segments:
+            return False
+        if not any((s.get("text") or "").strip() for s in segments):
             return False
         max_gap_ms = max_gap_minutes * 60_000
         if segments[0]["start_ms"] > max_gap_ms:

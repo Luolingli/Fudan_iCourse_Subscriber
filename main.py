@@ -114,10 +114,12 @@ def _enumerate_lectures(client: ICourseClient, db: Database,
             lectures = deduped
 
             known_processed = db.get_processed_sub_ids(course_id)
+            abandoned = db.get_abandoned_sub_ids(course_id)
             new_lectures = [
                 lec for lec in lectures
                 if lec.get("has_playback")
                 and str(lec["sub_id"]) not in known_processed
+                and str(lec["sub_id"]) not in abandoned
             ]
             unprocessed = db.get_unprocessed_lectures(course_id)
             new_ids = {str(lec["sub_id"]) for lec in new_lectures}
@@ -292,6 +294,12 @@ def run():
     corrected = db.sync_dates_from_sub()
     if corrected:
         print(f"  [Date] Synced {corrected} lecture date(s) from sub_title", flush=True)
+    if config.FORCE_SUB_IDS:
+        for sid in config.FORCE_SUB_IDS:
+            if db.force_reset_lecture(sid):
+                reporter.info(f"[Force] reset lecture {sid} for full reprocessing")
+            else:
+                reporter.info(f"[Force] lecture {sid} not found, nothing to reset")
     transcriber = Transcriber()
     summarizer = Summarizer() if config.COURSE_IDS else None
     emailer = Emailer() if (

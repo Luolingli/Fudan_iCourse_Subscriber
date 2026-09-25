@@ -204,3 +204,14 @@ CRAWL_TERM = os.environ.get("CRAWL_TERM", "").strip()
 # 强制本次运行刷新学期目录（不受每月 5/25 号限制）。
 # 例：FORCE_CRAWL=true
 FORCE_CRAWL = os.environ.get("FORCE_CRAWL", "").strip().lower() in ("1", "true", "yes")
+
+# 强制全量重摘录的讲义 sub_id 列表（逗号分隔）。
+# 运行前会清空这些节的 processed/error/邮件状态、缓存转录与摘要，并把其
+# ppt_pages 全部重置为 pending（含 dedup_dropped），使下次处理从下载、
+# ASR、PPT OCR 到摘要完整重跑。用于强制摘录被误标完成的缺失讲义。
+# 例：FORCE_SUB_IDS=664140
+FORCE_SUB_IDS = [
+    s.strip()
+    for s in os.environ.get("FORCE_SUB_IDS", "").split(",")
+    if s.strip()
+]

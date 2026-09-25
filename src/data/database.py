@@ -197,6 +197,57 @@ class Database:
             ).fetchall()
         return {row["sub_id"] for row in rows}
 
+    def get_abandoned_sub_ids(self, course_id: str,
+                              max_errors: int = 3) -> set[str]:
+        """Return sub_ids that exhausted their retry budget without ever
+        being processed (error_count >= max_errors, processed_at NULL).
+
+        The enumeration loop skips these so a permanently broken recording
+        (silent audio + garbage screenshots) doesn't burn a full
+        download + ASR pass on every run.  ``force_reset_lecture`` re-arms
+        one manually.  Mirrors the retry cap ``get_unprocessed_lectures``
+        already applies to lectures no longer listed on iCourse.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT sub_id FROM lectures
+                   WHERE course_id = ? AND processed_at IS NULL
+                     AND error_count >= ?""",
+                (course_id, max_errors),
+            ).fetchall()
+        return {row["sub_id"] for row in rows}
+
+    def force_reset_lecture(self, sub_id: str) -> bool:
+        """Fully re-arm one lecture for reprocessing.
+
+        Clears processed/error/email flags, the cached transcript and
+        summary, and resets every ppt_pages row (including
+        'dedup_dropped') back to 'pending' with no dhash, so the next run
+        redoes image download, dHash dedup, OCR, ASR and summary from
+        scratch.  Used by FORCE_SUB_IDS to force-extract a lecture that a
+        broken run marked done with no content.
+
+        Returns True if a lectures row was reset, False if the sub_id is
+        unknown.
+        """
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """UPDATE lectures
+                   SET processed_at = NULL, emailed_at = NULL,
+                       transcript = NULL, summary = NULL, summary_model = NULL,
+                       error_stage = NULL, error_msg = NULL, error_count = 0
+                   WHERE sub_id = ?""",
+                (sub_id,),
+            )
+            self.conn.execute(
+                """UPDATE ppt_pages
+                   SET ocr_status = 'pending', text = NULL,
+                       dhash = NULL, ocr_at = NULL
+                   WHERE sub_id = ?""",
+                (sub_id,),
+            )
+        return (cur.rowcount or 0) > 0
+
     def get_unprocessed_lectures(self, course_id: str | None = None,
                                   max_errors: int = 3) -> list[dict]:
         """Return lectures that need (re-)processing.

@@ -12,6 +12,11 @@ on:
         required: false
         default: false
         type: boolean
+      force_sub_ids:
+        description: "Force full re-extraction of specific lectures (comma-separated sub_ids, e.g. 664140)"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -175,6 +180,7 @@ jobs:
           COURSE_IDS: ${{ secrets.COURSE_IDS }}
           CRAWL_TERM: ${{ secrets.CRAWL_TERM }}
           FORCE_CRAWL: ${{ github.event.inputs.force_crawl == 'true' }}
+          FORCE_SUB_IDS: ${{ github.event.inputs.force_sub_ids }}
           SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}

@@ -183,7 +183,9 @@ class Summarizer:
             RuntimeError: if all providers/models fail.
         """
         if not content or not content.strip():
-            return ("（内容为空）", "")
+            # 空内容若被当作成功，会写入一条空总结并让该节被标记完成，
+            # 导致该节永远无法重摘录。显式抛错以触发兜底/重试。
+            raise ValueError("empty prompt content — nothing to summarize")
 
         errors = []
         for provider in self.providers:
