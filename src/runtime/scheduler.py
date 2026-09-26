@@ -131,6 +131,7 @@ class AudioHandle:
     path: str          # disk file ffmpeg writes f32le mono 16 kHz to
     process: subprocess.Popen
     stderr_chunks: list[bytes]
+    url: str = ""      # signed video URL this job downloads (variant id)
 
 
 class _PendingSpawn:
@@ -173,12 +174,18 @@ class AudioDownloader:
                 if isinstance(h, AudioHandle)
             )
 
-    def schedule(self, client, course_id: str, sub_id: str) -> None:
+    def schedule(self, client, course_id: str, sub_id: str,
+                 url: str | None = None) -> None:
         """Reserve a slot for sub_id and spawn ffmpeg in the background.
 
         Returns immediately. If all slots are taken the spawn blocks in its
         background thread until a slot frees.  Idempotent — second call for
         the same sub_id is a no-op.
+
+        ``url`` overrides the video URL to download (used to retry a
+        lecture with an alternative transcode variant after the first one
+        transcribes to silence); when omitted the client's primary
+        candidate is fetched.
         """
         sub_id = str(sub_id)
         pending = _PendingSpawn()
@@ -189,7 +196,7 @@ class AudioDownloader:
 
         threading.Thread(
             target=self._spawn_when_ready,
-            args=(client, course_id, sub_id, pending),
+            args=(client, course_id, sub_id, pending, url),
             name=f"audio-spawn-{sub_id}",
             daemon=True,
         ).start()
@@ -201,16 +208,17 @@ class AudioDownloader:
                 self._active.pop(sub_id, None)
 
     def _spawn_when_ready(self, client, course_id: str, sub_id: str,
-                          pending: _PendingSpawn):
+                          pending: _PendingSpawn,
+                          url: str | None = None):
         try:
             self._sem.acquire()
             try:
-                url = client.get_video_url(course_id, sub_id)
-                if not url:
+                video_url = url or client.get_video_url(course_id, sub_id)
+                if not video_url:
                     self._pop_if_mine(sub_id, pending)
                     self._sem.release()
                     return
-                vpn_url, headers = client.get_stream_params(url)
+                vpn_url, headers = client.get_stream_params(video_url)
                 path = os.path.join(self._dir, f"{sub_id}.raw")
                 if os.path.exists(path):
                     os.remove(path)
@@ -257,6 +265,7 @@ class AudioDownloader:
                 handle = AudioHandle(
                     sub_id=sub_id, path=path,
                     process=proc, stderr_chunks=stderr_chunks,
+                    url=video_url,
                 )
 
                 # Install the handle — unless release() already removed our

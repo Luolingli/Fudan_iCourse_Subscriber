@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import time
 from typing import TYPE_CHECKING, Optional
+from urllib.parse import urlparse
 
 from src.ai import bucketer
 from src.pipeline.ppt_pipeline import PPTPipeline
@@ -368,7 +369,84 @@ class LectureRunner:
             self._release_audio(sub_id)
             raise
 
+        # A full-length download that transcribes to zero speech usually
+        # means iCourse served a broken transcode (dead audio track) for
+        # the video variant we picked — 泛函分析 664140 carried two
+        # 1920x1080 variants, only the first one silent.  Re-download and
+        # re-ASR each remaining distinct variant before giving up.
+        if not transcript.strip():
+            transcript, segments = self._retry_alternate_videos(
+                sub_id, course_id, handle, transcript, segments)
+
         self._db.update_transcript(sub_id, transcript)
+        return transcript, segments
+
+    def _retry_alternate_videos(self, sub_id: str, course_id: str,
+                                handle, transcript: str,
+                                segments) -> tuple[str, list]:
+        """Re-ASR each remaining distinct video variant of a lecture whose
+        primary variant transcribed to zero speech.
+
+        Returns the first non-empty (transcript, segments), or the original
+        empty result when every variant is silent / unusable.
+        """
+        try:
+            candidates = self._client.get_video_url_candidates(
+                course_id, sub_id)
+        except Exception as e:
+            self._reporter.info(
+                f"    [Alt video] candidate lookup failed: {e}"
+            )
+            return transcript, segments
+
+        current_path = (urlparse(handle.url).path
+                        if getattr(handle, "url", None) else "")
+        downloader = self._scheduler.audio_downloader
+        for alt in candidates:
+            alt_path = urlparse(alt).path
+            if alt_path == current_path:
+                continue
+            self._reporter.info(
+                f"    Empty transcript — retrying with alternative video "
+                f"variant {alt_path.rsplit('/', 1)[-1]}"
+            )
+            self._release_audio(sub_id)
+            downloader.schedule(self._client, course_id, sub_id, url=alt)
+            try:
+                alt_handle = downloader.get(sub_id, timeout=120)
+            except TimeoutError as e:
+                self._reporter.info(f"    [Alt video] {e}")
+                return transcript, segments
+            if alt_handle is None:
+                return transcript, segments
+            try:
+                alt_transcript, alt_segments = \
+                    self._transcriber.transcribe_tail(
+                        alt_handle.path, alt_handle.process,
+                        alt_handle.stderr_chunks,
+                    )
+            except NoAudioStreamError as e:
+                self._reporter.info(f"    [Alt video] no audio stream: {e}")
+                continue
+            except IncompleteAudioError as e:
+                self._reporter.info(f"    [Alt video] incomplete: {e}")
+                continue
+            except Exception as e:
+                self._reporter.info(
+                    f"    [Alt video] transcription error: "
+                    f"{type(e).__name__}: {e}"
+                )
+                continue
+            if alt_transcript.strip():
+                self._reporter.info(
+                    f"    [Alt video] recovered: "
+                    f"{len(alt_transcript)} chars, "
+                    f"{len(alt_segments or [])} segments"
+                )
+                return alt_transcript, alt_segments
+            self._reporter.info(
+                "    [Alt video] also empty — trying next variant"
+            )
         return transcript, segments
 
     def _summarize(self, sub_id: str, course_title: str, transcript: str,

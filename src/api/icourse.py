@@ -464,7 +464,17 @@ class ICourseClient:
         return payload
 
     def get_video_url(self, course_id: str, sub_id: str) -> str | None:
-        """Get a signed MP4 video URL for a specific lecture.
+        """Get the primary signed MP4 video URL for a specific lecture.
+
+        See ``get_video_url_candidates`` for the source cascade; this
+        returns the first (highest-priority) candidate.
+        """
+        candidates = self.get_video_url_candidates(course_id, sub_id)
+        return candidates[0] if candidates else None
+
+    def get_video_url_candidates(self, course_id: str,
+                                 sub_id: str) -> list[str]:
+        """Get signed MP4 video URLs for a lecture, highest priority first.
 
         Cascades through URL sources, most- to least-preferred:
           1. info.video_list[*].preview_url     — healthy lecture
@@ -478,7 +488,12 @@ class ICourseClient:
         CDN itself does not enforce the gate, so a signed URL from
         either source downloads successfully.
 
-        Returns the signed video URL string, or None if no source yields one.
+        video_list/playurl are keyed by file variant, NOT quality tier:
+        iCourse can carry two transcodes of the same 1920x1080 source for
+        one lecture (e.g. 泛函分析 664140), and one of them may have a
+        dead audio track.  Every distinct file is returned (deduped by
+        path) so a caller that transcribes zero speech can fall back to
+        the next variant.  Returns [] when no source yields a URL.
         """
         try:
             info = self.get_sub_info(course_id, sub_id)
@@ -492,80 +507,75 @@ class ICourseClient:
         if isinstance(now, str):
             now = int(now)
 
-        # Extract base video URL from playurl dict or video_list
-        base_url = None
-        chosen_source = None
+        base_urls: list[tuple[str, str]] = []
+        seen_names: set[str] = set()
 
-        # Try video_list first (has preview_url without /0/ prefix)
+        def _add(base: str, source: str) -> None:
+            # Dedupe by filename, not path: playurl entries carry a /0/
+            # prefix while video_list uses /videos/, so the same file
+            # appears under different paths from different sources.
+            name = urlparse(base).path.rsplit("/", 1)[-1]
+            if name in seen_names:
+                return
+            seen_names.add(name)
+            base_urls.append((base, source))
+
+        # video_list first (preview_url without /0/ prefix)
         video_list = info.get("video_list", {})
         if isinstance(video_list, dict):
             for k, v in video_list.items():
                 if isinstance(v, dict):
                     preview = v.get("preview_url")
                     if preview and preview.endswith(".mp4"):
-                        base_url = preview
-                        chosen_source = f"video_list[{k}]"
-                        break
+                        _add(preview, f"video_list[{k}]")
 
-        # Fallback: try playurl dict (has /0/ prefix, may need stripping)
-        if not base_url:
-            playurl = info.get("playurl", {})
-            if isinstance(playurl, dict):
-                for k, v in playurl.items():
-                    if k == "now":
-                        continue
-                    if isinstance(v, str) and v.endswith(".mp4"):
-                        base_url = v
-                        chosen_source = f"playurl[{k}]"
-                        break
+        # then playurl (has /0/ prefix, may need stripping)
+        playurl = info.get("playurl", {})
+        if isinstance(playurl, dict):
+            for k, v in playurl.items():
+                if k == "now":
+                    continue
+                if isinstance(v, str) and v.endswith(".mp4"):
+                    _add(v, f"playurl[{k}]")
 
         # Review-gate fallback: nested content.playback.url is preserved
         # even when code == 7001 scrubs the top-level fields above.
-        if not base_url:
-            playback = (info.get("content") or {}).get("playback") or {}
-            nested = playback.get("url")
-            if isinstance(nested, str) and nested.endswith(".mp4"):
-                base_url = nested
-                chosen_source = "content.playback"
-                if not now:
-                    content_now = (info.get("content") or {}).get("now")
-                    if isinstance(content_now, (int, str)):
-                        now = int(content_now)
+        playback = (info.get("content") or {}).get("playback") or {}
+        nested = playback.get("url")
+        if isinstance(nested, str) and nested.endswith(".mp4"):
+            _add(nested, "content.playback")
+            if not now:
+                content_now = (info.get("content") or {}).get("now")
+                if isinstance(content_now, (int, str)):
+                    now = int(content_now)
 
         # Last resort: hit get-sub-detail (gate-free) directly.
-        if not base_url:
+        if not base_urls:
             try:
                 detail = self.get_sub_detail(course_id, sub_id)
                 content = detail.get("content", {})
                 playback = content.get("playback", {})
                 if playback and playback.get("url"):
-                    base_url = playback["url"]
-                    chosen_source = "sub_detail"
+                    _add(playback["url"], "sub_detail")
             except Exception:
                 pass
 
-        if not base_url:
+        if not base_urls:
             print(f"    No video URL found for {sub_id} (tried video_list, "
                   f"playurl, content.playback, sub_detail)")
-            return None
+            return []
 
-        # Log the selected rendition and the other available files.
-        # video_list/playurl are keyed by quality tier; picking a tier whose
-        # transcode has a dead audio track yields a full-length file with
-        # zero speech — this line is what pinpoints that case.
-        tiers = {}
-        for src in ("video_list", "playurl"):
-            for k, v in (info.get(src) or {}).items():
-                if k == "now":
-                    continue
-                u = v.get("preview_url") if isinstance(v, dict) else v
-                if isinstance(u, str) and u:
-                    tiers[f"{src}[{k}]"] = urlparse(u).path.rsplit("/", 1)[-1]
-        chosen_file = urlparse(base_url).path.rsplit("/", 1)[-1]
-        print(f"    Video rendition: selected {chosen_source} "
-              f"({chosen_file}); available: {tiers or 'n/a'}")
+        # Log the selected variant and the other available files.
+        # Picking a variant whose transcode has a dead audio track yields a
+        # full-length file with zero speech — this line is what pinpoints
+        # that case.
+        variant_files = {src: urlparse(u).path.rsplit("/", 1)[-1]
+                         for u, src in base_urls}
+        print(f"    Video rendition: selected {base_urls[0][1]} "
+              f"({variant_files[base_urls[0][1]]}); "
+              f"available: {variant_files}")
 
-        return self.sign_video_url(base_url, now=now)
+        return [self.sign_video_url(u, now=now) for u, _ in base_urls]
 
     def get_stream_params(self, video_url: str) -> tuple[str, str]:
         """Get WebVPN URL and HTTP headers for direct streaming (e.g., ffmpeg).
