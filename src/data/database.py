@@ -246,6 +246,22 @@ class Database:
                    WHERE sub_id = ?""",
                 (sub_id,),
             )
+            # One-shot marker for the deploy-time merge: merge_db.py is
+            # additive-only (COALESCE prefers non-null), so the NULLs set
+            # above would be silently reverted by the remote's stale values.
+            # merge_db.py applies local-wins (full row overwrite) for every
+            # sub_id listed here, then consumes the marker.
+            row = self.conn.execute(
+                "SELECT value FROM meta WHERE key = 'force_reset_sub_ids'"
+            ).fetchone()
+            existing = [s for s in (row["value"].split(",") if row else []) if s]
+            if sub_id not in existing:
+                existing.append(sub_id)
+            self.conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) "
+                "VALUES ('force_reset_sub_ids', ?)",
+                (",".join(existing),),
+            )
         return (cur.rowcount or 0) > 0
 
     def get_unprocessed_lectures(self, course_id: str | None = None,

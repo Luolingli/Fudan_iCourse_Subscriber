@@ -154,6 +154,65 @@ def merge(local_path: str, remote_path: str):
                     WHERE excluded.last_seen_at > all_courses.last_seen_at
                 """)
 
+            # 7) One-shot force resets (FORCE_SUB_IDS): the merge above is
+            # additive-only — COALESCE prefers non-null, so an intentional
+            # clear (re-arming a lecture that a broken run marked done with
+            # no content) would be silently reverted by the remote's stale
+            # values.  For every sub_id recorded in the local meta marker,
+            # apply the local row as the full source of truth (including
+            # NULLs) for the lecture and its ppt_pages, then consume the
+            # marker so it only applies once.
+            has_local_meta = conn.execute(
+                "SELECT 1 FROM local.sqlite_master "
+                "WHERE type='table' AND name='meta'"
+            ).fetchone()
+            marker = None
+            if has_local_meta:
+                marker = conn.execute(
+                    "SELECT value FROM local.meta "
+                    "WHERE key = 'force_reset_sub_ids'"
+                ).fetchone()
+            if marker and (marker[0] or "").strip():
+                for sid in marker[0].split(","):
+                    sid = sid.strip()
+                    if not sid:
+                        continue
+                    conn.execute(
+                        """UPDATE main.lectures SET
+                            course_id     = l.course_id,
+                            sub_title     = l.sub_title,
+                            date          = l.date,
+                            transcript    = l.transcript,
+                            summary       = l.summary,
+                            summary_model = l.summary_model,
+                            processed_at  = l.processed_at,
+                            emailed_at    = l.emailed_at,
+                            error_stage   = l.error_stage,
+                            error_msg     = l.error_msg,
+                            error_count   = l.error_count
+                        FROM local.lectures l
+                        WHERE main.lectures.sub_id = l.sub_id
+                          AND main.lectures.sub_id = ?""",
+                        (sid,),
+                    )
+                    conn.execute(
+                        """UPDATE main.ppt_pages SET
+                            created_sec = p.created_sec,
+                            pptimgurl   = p.pptimgurl,
+                            text        = p.text,
+                            ocr_status  = p.ocr_status,
+                            ocr_at      = p.ocr_at,
+                            dhash       = p.dhash
+                        FROM local.ppt_pages p
+                        WHERE main.ppt_pages.sub_id = p.sub_id
+                          AND main.ppt_pages.sub_id = ?""",
+                        (sid,),
+                    )
+                    print(f"force reset applied (local wins): {sid}")
+                conn.execute(
+                    "DELETE FROM main.meta WHERE key = 'force_reset_sub_ids'"
+                )
+
     finally:
         # Persist COURSE_IDS from the CI secret into the meta table so
         # the frontend can read the current subscription list from the
