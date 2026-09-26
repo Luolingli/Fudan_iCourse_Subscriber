@@ -494,15 +494,17 @@ class ICourseClient:
 
         # Extract base video URL from playurl dict or video_list
         base_url = None
+        chosen_source = None
 
         # Try video_list first (has preview_url without /0/ prefix)
         video_list = info.get("video_list", {})
         if isinstance(video_list, dict):
-            for _, v in video_list.items():
+            for k, v in video_list.items():
                 if isinstance(v, dict):
                     preview = v.get("preview_url")
                     if preview and preview.endswith(".mp4"):
                         base_url = preview
+                        chosen_source = f"video_list[{k}]"
                         break
 
         # Fallback: try playurl dict (has /0/ prefix, may need stripping)
@@ -514,6 +516,7 @@ class ICourseClient:
                         continue
                     if isinstance(v, str) and v.endswith(".mp4"):
                         base_url = v
+                        chosen_source = f"playurl[{k}]"
                         break
 
         # Review-gate fallback: nested content.playback.url is preserved
@@ -523,6 +526,7 @@ class ICourseClient:
             nested = playback.get("url")
             if isinstance(nested, str) and nested.endswith(".mp4"):
                 base_url = nested
+                chosen_source = "content.playback"
                 if not now:
                     content_now = (info.get("content") or {}).get("now")
                     if isinstance(content_now, (int, str)):
@@ -536,6 +540,7 @@ class ICourseClient:
                 playback = content.get("playback", {})
                 if playback and playback.get("url"):
                     base_url = playback["url"]
+                    chosen_source = "sub_detail"
             except Exception:
                 pass
 
@@ -543,6 +548,22 @@ class ICourseClient:
             print(f"    No video URL found for {sub_id} (tried video_list, "
                   f"playurl, content.playback, sub_detail)")
             return None
+
+        # Log the selected rendition and the other available files.
+        # video_list/playurl are keyed by quality tier; picking a tier whose
+        # transcode has a dead audio track yields a full-length file with
+        # zero speech — this line is what pinpoints that case.
+        tiers = {}
+        for src in ("video_list", "playurl"):
+            for k, v in (info.get(src) or {}).items():
+                if k == "now":
+                    continue
+                u = v.get("preview_url") if isinstance(v, dict) else v
+                if isinstance(u, str) and u:
+                    tiers[f"{src}[{k}]"] = urlparse(u).path.rsplit("/", 1)[-1]
+        chosen_file = urlparse(base_url).path.rsplit("/", 1)[-1]
+        print(f"    Video rendition: selected {chosen_source} "
+              f"({chosen_file}); available: {tiers or 'n/a'}")
 
         return self.sign_video_url(base_url, now=now)
 
