@@ -1,0 +1,6 @@
+{
+ "sub_id": "probe-full",
+ "url": "https://github.com/Luolingli/Fudan_iCourse_Subscriber/releases/download/asr-probe-664140-v2/fa_full_raw.f32",
+ "asr_test": true,
+ "note": "decisive: WHOLE 664140 audio unfiltered (as-heard), VAD-free SenseVoice decode, 15 s win / 12 s hop, non-empty chunks logged with file timestamp. User locates intelligible speech at 2675-2679 s."
+}

@@ -293,20 +293,39 @@ def _run_asr_probes(transcriber, reporter) -> None:
     for sid, entry in probes.items():
         try:
             reporter.info(f"[ASR probe] {sid}: downloading asset ...")
-            with urlopen(entry["url"], timeout=300) as r:
+            with urlopen(entry["url"], timeout=1800) as r:
                 buf = np.frombuffer(r.read(), dtype=np.float32)
-            step = 5 * SAMPLE_RATE
-            for i in range((len(buf) + step - 1) // step):
-                chunk = buf[i * step:(i + 1) * step]
+            # 15 s windows on a 12 s stride (3 s overlap) — long enough to
+            # carry a sentence across chunk seams, overlap means a word
+            # straddling a boundary is caught whole by one of them.
+            win = 15 * SAMPLE_RATE
+            hop = 12 * SAMPLE_RATE
+            offset = int(float(entry.get("lead_offset_sec") or 0) * SAMPLE_RATE)
+            hits = 0
+            n_chunks = max(1, (len(buf) - offset + hop - 1) // hop)
+            for i in range(n_chunks):
+                chunk = buf[offset + i * hop: offset + (i + 1) * hop + (win - hop)]
                 if not len(chunk):
                     break
-                rms = float(np.sqrt(
-                    (chunk.astype(np.float64) ** 2).mean()))
+                t0 = (offset + i * hop) / SAMPLE_RATE
                 text = transcriber.decode_chunk(chunk)
-                reporter.info(
-                    f"[ASR probe] {sid} chunk@{i * 5:02d}s "
-                    f"rms={rms:.4f}: {text!r}"
-                )
+                if text.strip():
+                    hits += 1
+                    rms = float(np.sqrt(
+                        (chunk.astype(np.float64) ** 2).mean()))
+                    reporter.info(
+                        f"[ASR probe] {sid} t={t0:07.1f}s "
+                        f"rms={rms:.4f}: {text!r}"
+                    )
+                if (i + 1) % 100 == 0:
+                    reporter.info(
+                        f"[ASR probe] {sid} progress {i + 1}/{n_chunks} "
+                        f"chunks, {hits} with text so far"
+                    )
+            reporter.info(
+                f"[ASR probe] {sid} DONE: {n_chunks} chunks decoded, "
+                f"{hits} produced text"
+            )
         except Exception as e:
             reporter.info(
                 f"[ASR probe] {sid} failed: {type(e).__name__}: {e}"
