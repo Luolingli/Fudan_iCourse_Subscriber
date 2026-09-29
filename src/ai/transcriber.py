@@ -205,6 +205,67 @@ class Transcriber:
         self._last_transcript = ""           # text from last transcription
         self._last_segments: list[dict] = []
         self._media_duration: Optional[float] = None
+        self._punct = None              # OfflinePunctuation (lazy)
+        self._punct_tried = False
+        self._punct_ready = False
+
+    # ── Runtime model bootstrap ─────────────────────────────────────────
+
+    @staticmethod
+    def _bootstrap_file(dest: str, url: str, min_size: int = 1_500_000) -> bool:
+        """Ensure a single-file release asset exists at ``dest`` (CWD).
+
+        CI normally restores models from the actions cache; this covers the
+        cache-miss path after upstream renames an asset (the bare
+        ``silero_vad.onnx`` was removed in favour of ``silero_vad_v4``) —
+        a file that is missing or implausibly small (a 404 page) is
+        re-fetched.  Failures return False; callers decide how to degrade.
+        """
+        if os.path.isfile(dest) and os.path.getsize(dest) >= min_size:
+            return True
+        try:
+            from urllib.request import Request, urlopen
+            req = Request(url, headers={"User-Agent": "icourse-subscriber"})
+            with urlopen(req, timeout=300) as r:
+                blob = r.read()
+            if len(blob) < min_size:
+                return False
+            tmp = dest + ".part"
+            with open(tmp, "wb") as f:
+                f.write(blob)
+            os.replace(tmp, dest)
+            print(f"[Transcriber] bootstrapped {dest} "
+                  f"({len(blob) / 1e6:.1f} MB)", flush=True)
+            return True
+        except Exception as e:
+            print(f"[Transcriber] bootstrap of {dest} failed: "
+                  f"{type(e).__name__}: {e}", flush=True)
+            return False
+
+    @staticmethod
+    def _bootstrap_tarball_dir(marker: str, url: str) -> bool:
+        """Ensure the extracted directory ``marker`` exists; if not, fetch
+        the release tarball.bz2 and extract it into the CWD."""
+        if os.path.isdir(marker):
+            return True
+        try:
+            import io
+            import tarfile
+            from urllib.request import Request, urlopen
+            req = Request(url, headers={"User-Agent": "icourse-subscriber"})
+            with urlopen(req, timeout=600) as r:
+                blob = r.read()
+            if len(blob) < 10_000_000:
+                return False
+            with tarfile.open(fileobj=io.BytesIO(blob), mode="r:bz2") as t:
+                t.extractall(filter="data")
+            print(f"[Transcriber] bootstrapped {marker} "
+                  f"({len(blob) / 1e6:.1f} MB)", flush=True)
+            return os.path.isdir(marker)
+        except Exception as e:
+            print(f"[Transcriber] bootstrap of {marker} failed: "
+                  f"{type(e).__name__}: {e}", flush=True)
+            return False
 
     # ── Model lifecycle ─────────────────────────────────────────────────
 
@@ -226,10 +287,12 @@ class Transcriber:
             )
 
         vad_path = config.SILERO_VAD_PATH
-        if not os.path.isfile(vad_path):
+        # Small-but-present files (404 HTML cached once) are as fatal as
+        # missing ones — _bootstrap_file re-fetches either way.
+        if not self._bootstrap_file(vad_path, config.SILERO_VAD_URL):
             raise FileNotFoundError(
-                f"silero_vad.onnx not found at '{vad_path}'. Download from "
-                f"https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models"
+                f"silero_vad.onnx missing/too small at '{vad_path}' and "
+                f"runtime bootstrap from {config.SILERO_VAD_URL} failed"
             )
         self._vad_config = sherpa_onnx.VadModelConfig()
         self._vad_config.silero_vad.model = vad_path
@@ -335,6 +398,9 @@ class Transcriber:
             stream.accept_waveform(SAMPLE_RATE, samples)
             self._recognizer.decode_stream(stream)
             text = _postprocess_segment(stream.result.text)
+            # Punctuation is applied per VAD segment (sentence-ish units);
+            # degrades to no-op when the model is unavailable.
+            text = self._punctuate(text)
             if text:
                 start_ms = int(seg_start_samples / SAMPLE_RATE * 1000)
                 end_ms = int(
@@ -384,6 +450,51 @@ class Transcriber:
                                np.asarray(samples, dtype=np.float32))
         self._recognizer.decode_stream(stream)
         return _postprocess_segment(stream.result.text)
+
+    # ── Punctuation (CT-Transformer, optional) ──────────────────────────
+
+    def _load_punct(self):
+        """One-time: bootstrap + construct the zh-en punctuation model.
+        Any failure permanently degrades to unpunctuated output (a
+        readability nicety, never a pipeline dependency)."""
+        self._punct_tried = True
+        if not self._bootstrap_tarball_dir(
+                config.PUNCT_MODEL_DIR, config.PUNCT_MODEL_URL):
+            return
+        d = config.PUNCT_MODEL_DIR
+        # The ct_transformer setting takes the model dir on some builds and
+        # the .onnx file on others — try both shapes.
+        for cand in (d, os.path.join(d, "model.int8.onnx"),
+                     os.path.join(d, "model.onnx")):
+            try:
+                cfg = sherpa_onnx.OfflinePunctuationConfig(
+                    model=sherpa_onnx.OfflinePunctuationModelConfig(
+                        ct_transformer=cand,
+                        num_threads=2,
+                        provider="cpu",
+                    )
+                )
+                self._punct = sherpa_onnx.OfflinePunctuation(cfg)
+                self._punct_ready = True
+                print(f"[Transcriber] punctuation model loaded "
+                      f"({cand}).", flush=True)
+                return
+            except Exception:
+                continue
+        print("[Transcriber] punctuation model failed to load — "
+              "punctuation disabled.", flush=True)
+
+    def _punctuate(self, text: str) -> str:
+        if not text:
+            return text
+        if not self._punct_tried:
+            self._load_punct()
+        if not self._punct_ready:
+            return text
+        try:
+            return self._punct.add_punctuation(text)
+        except Exception:
+            return text
 
     # ── Shared consumer core ────────────────────────────────────────────
 

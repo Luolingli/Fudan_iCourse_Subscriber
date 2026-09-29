@@ -1,7 +1,10 @@
-"""OCR using RapidOCR (ONNX, ~20MB total). Provides a simple sync API.
+"""OCR using RapidOCR 3.x.
 
-The RapidOCR runtime is thread-safe per-instance but model files are large,
-so we load ONE recognizer per process and let multiple threads call it.
+PP-OCRv6 det+rec ONNX models ship inside the rapidocr wheel — nothing is
+downloaded at runtime.  One engine is loaded per process; rapidocr 3.x
+instances are not documented as thread-safe and this pipeline calls OCR
+from background threads, so each inference is serialized under ``_lock``
+(the ONNX ops already saturate the runner's cores internally).
 """
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ import threading
 from dataclasses import dataclass
 
 from PIL import Image
-from rapidocr_onnxruntime import RapidOCR
+from rapidocr import RapidOCR
 
 _lock = threading.Lock()
 _engine: RapidOCR | None = None
@@ -34,10 +37,8 @@ class OCRBlock:
 
 
 def ocr_image(image_bytes: bytes) -> list[OCRBlock]:
-    """Run OCR on raw image bytes. Returns list of recognized blocks.
-
-    Returns [] on any decode/engine failure (never raises for normal failures).
-    """
+    """Run OCR on raw image bytes. Returns recognized blocks ([] on any
+    decode/engine failure — never raises for normal failures)."""
     try:
         img = Image.open(io.BytesIO(image_bytes))
         if img.mode != "RGB":
@@ -50,22 +51,29 @@ def ocr_image(image_bytes: bytes) -> list[OCRBlock]:
 
     engine = _get_engine()
     try:
-        result, _elapsed = engine(arr)
+        with _lock:
+            result = engine(arr)
     except Exception as e:
         print(f"[OCR] engine call failed: {type(e).__name__}: {e}")
         return []
 
-    if not result:
+    txts = getattr(result, "txts", None)
+    if result is None or not txts:
         return []
 
+    scores = list(getattr(result, "scores", None) or [])
+    boxes = list(getattr(result, "boxes", None) or [])
     blocks = []
-    for item in result:
-        if len(item) < 3:
+    for i, text in enumerate(txts):
+        if not text or not str(text).strip():
             continue
-        box, text, score = item[0], item[1], float(item[2])
-        if not text or not text.strip():
-            continue
-        blocks.append(OCRBlock(text=text.strip(), confidence=score, box=box))
+        try:
+            conf = float(scores[i]) if i < len(scores) else 1.0
+        except (TypeError, ValueError):
+            conf = 1.0
+        box = (boxes[i].tolist()
+               if i < len(boxes) and hasattr(boxes[i], "tolist") else [])
+        blocks.append(OCRBlock(text=str(text).strip(), confidence=conf, box=box))
     return blocks
 
 

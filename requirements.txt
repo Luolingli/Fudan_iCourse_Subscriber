@@ -7,5 +7,8 @@ pillow
 markdown
 psutil
 pygments
-rapidocr-onnxruntime
+# RapidOCR 3.x: PP-OCRv6 det+rec ONNX bundled in the wheel (no runtime
+# model download); onnxruntime is its default engine but not a declared dep.
+rapidocr>=3.9,<4
+onnxruntime
 imagehash

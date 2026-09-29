@@ -157,6 +157,26 @@ ASR_MODEL_DIR = os.environ.get(
 )
 SENSEVOICE_MODEL_DIR = ASR_MODEL_DIR  # alias for any straggler imports
 SILERO_VAD_PATH = os.environ.get("SILERO_VAD_PATH", "silero_vad.onnx")
+# The CI's cached silero predates the upstream asset rename; if the file is
+# missing/short (e.g. a 404 HTML got written over it once the cache misses),
+# Transcriber re-fetches this URL at runtime.  Doing it in Python keeps
+# check.yml untouched — a workflow-file edit would park every scheduled run
+# behind action_required until someone clicks Approve in the UI.
+SILERO_VAD_URL = os.environ.get(
+    "SILERO_VAD_URL",
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad_v4.onnx",
+)
+# CT-Transformer punctuation (zh/en, int8): adds ，。？！ to SenseVoice
+# segments.  Bootstrapped at runtime like the VAD; a missing or unloadable
+# model degrades to unpunctuated text rather than failing the lecture.
+PUNCT_MODEL_DIR = os.environ.get(
+    "PUNCT_MODEL_DIR",
+    "sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8",
+)
+PUNCT_MODEL_URL = os.environ.get(
+    "PUNCT_MODEL_URL",
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/punctuation-models/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8.tar.bz2",
+)
 
 # ASR backend selector — Transcriber dispatches on this.  When changing,
 # ASR_MODEL_DIR must point at a matching sherpa-onnx model bundle:
