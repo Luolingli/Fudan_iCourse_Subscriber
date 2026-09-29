@@ -81,6 +81,9 @@ class LectureRunner:
         # (``_needs_audio``), keyed by sub_id, so ``_get_transcript`` doesn't
         # re-fetch them one lecture later.
         self._official_cache: dict[str, list[dict]] = {}
+        # Slide pages (platform-done or injected) per sub_id, shared between
+        # the Phase F content check and _summarize; fetched at most once.
+        self._pages_cache: dict[str, list[dict]] = {}
 
     # ── Public entry point ──────────────────────────────────────────────
 
@@ -177,7 +180,7 @@ class LectureRunner:
         # otherwise record an error so the lecture is retried next run and
         # abandoned only once error_count hits the retry cap.
         if not transcript.strip():
-            if self._db.get_done_ppt_pages(sub_id):
+            if self._kept_pages(sub_id):
                 self._reporter.info(
                     "    Empty transcript — summarizing from PPT text only."
                 )
@@ -219,6 +222,22 @@ class LectureRunner:
             existing
             and existing.get("summary")
         )
+
+    def _kept_pages(self, sub_id: str) -> list[dict]:
+        """Slide pages for one lecture: injected asset (ppt_url) when
+        configured and fetchable, else the platform's OCR'd pages.
+        Cached on the runner (fetched at most once per sub_id)."""
+        cached = self._pages_cache.get(sub_id)
+        if cached is not None:
+            return cached
+        pages = self._db.get_done_ppt_pages(sub_id)
+        asset = config.FORCE_AUDIO_MAP.get(sub_id)
+        if asset and asset.get("ppt_url"):
+            injected = self._download_ppt_json(sub_id, asset["ppt_url"])
+            if injected:
+                pages = injected
+        self._pages_cache[sub_id] = pages
+        return pages
 
     def prefetch_first(self, course_id: str, sub_id: str) -> None:
         """Prefetch for the first lecture in the batch — same decision
@@ -456,17 +475,22 @@ class LectureRunner:
                 f" head-60s-rms={rms:.5f} vad_canary={canary}"
             )
             if rms < 1e-4 or canary == 0:
-                # Deterministic failure — the video path cannot do better
-                # (known-broken file), so record the diagnosis and skip it
-                # instead of burning another 3+ minutes.
+                # No usable speech in the asset (rms verified the VAD rig
+                # with known speech).  With an injected slide asset the
+                # lecture can still be summarized board-only, so return an
+                # empty transcript instead of raising; otherwise skip the
+                # known-broken video path and record the diagnosis.
                 reason = (f"asset silent (rms={rms:.2e})"
                           if rms < 1e-4 else
-                          f"VAD canary fired 0 times on 60 s of known "
-                          f"speech — VAD/model broken on this runner")
+                          "VAD canary fired 0 times on 60 s — no "
+                          "detectable speech in the asset")
                 self._reporter.info(
-                    f"    [Injected audio] SELF-CHECK FAILED — {reason}; "
-                    f"skipping video path"
+                    f"    [Injected audio] SELF-CHECK FAILED — {reason}"
+                    + ("; board-only summary via ppt_url"
+                       if asset.get("ppt_url") else "; skipping video path")
                 )
+                if asset.get("ppt_url"):
+                    return "", []
                 self._db.update_error(
                     sub_id, "injected_audio", reason)
                 raise RuntimeError(f"Injected audio self-check failed: {reason}")
@@ -480,6 +504,12 @@ class LectureRunner:
                     f"{len(transcript)} chars, {len(segments)} segments"
                 )
                 return transcript, segments
+            if asset.get("ppt_url"):
+                self._reporter.info(
+                    "    [Injected audio] transcribed empty — board-only "
+                    "summary via ppt_url"
+                )
+                return "", []
             self._reporter.info(
                 "    [Injected audio] transcribed empty — "
                 "falling back to video path"
@@ -592,17 +622,9 @@ class LectureRunner:
     def _summarize(self, sub_id: str, course_title: str, transcript: str,
                    transcript_segments: list[dict] | None) -> Optional[str]:
         try:
-            kept_pages = self._db.get_done_ppt_pages(sub_id)
-            # Injected slide text (force_audio/<sub_id>.json "ppt_url")
-            # replaces the platform's screenshot OCR when the platform
-            # capture was broken (664140: all 98 screenshots were garbage
-            # screens; the real slides were OCR'd from the video file the
-            # user downloaded from the intranet instead).
-            asset = config.FORCE_AUDIO_MAP.get(sub_id)
-            if asset and asset.get("ppt_url"):
-                injected = self._download_ppt_json(sub_id, asset["ppt_url"])
-                if injected:
-                    kept_pages = injected
+            # Injected slide pages (ppt_url) take precedence over the
+            # platform's OCR'd pages — see _kept_pages.
+            kept_pages = self._kept_pages(sub_id)
             prompt_text, mode = bucketer.assemble(
                 transcript, transcript_segments, kept_pages,
             )
