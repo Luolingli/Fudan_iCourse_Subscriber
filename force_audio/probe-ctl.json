@@ -1,6 +1,6 @@
 {
  "sub_id": "probe-ctl",
- "url": "https://github.com/Luolingli/Fudan_iCourse_Subscriber/releases/download/asr-probe-664140-v2/ctl5.f32",
+ "url": "https://github.com/Luolingli/Fudan_iCourse_Subscriber/releases/download/asr-probe-664140-v3/ctl5.f32",
  "asr_test": true,
  "note": "positive control: 5 s of known Mandarin speech from SenseVoiceSmall/example/zh.mp3. MUST decode non-empty or the probe pipeline is invalid."
 }

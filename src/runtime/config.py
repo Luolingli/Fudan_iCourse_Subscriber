@@ -235,8 +235,11 @@ def _load_force_audio() -> dict[str, dict]:
             try:
                 with open(os.path.join(d, name)) as f:
                     entry = json.load(f)
-                has_url = isinstance(entry.get("url"), str) and entry.get("url")
-                has_ppt = isinstance(entry.get("ppt_url"), str) and entry.get("ppt_url")
+                url = entry.get("url")
+                ppt_url = entry.get("ppt_url")
+                has_url = ((isinstance(url, str) and url)
+                           or (isinstance(url, list) and url))
+                has_ppt = isinstance(ppt_url, str) and bool(ppt_url)
                 if not has_url and not has_ppt:
                     continue
                 sid = str(entry.get("sub_id") or name.rsplit(".", 1)[0])
