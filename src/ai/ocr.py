@@ -57,12 +57,19 @@ def ocr_image(image_bytes: bytes) -> list[OCRBlock]:
         print(f"[OCR] engine call failed: {type(e).__name__}: {e}")
         return []
 
+    if result is None:
+        return []
     txts = getattr(result, "txts", None)
-    if result is None or not txts:
+    # .txts is a numpy array in rapidocr 3.x — never truth-test it directly
+    if txts is None or len(txts) == 0:
         return []
 
-    scores = list(getattr(result, "scores", None) or [])
-    boxes = list(getattr(result, "boxes", None) or [])
+    # .scores/.boxes are numpy arrays in rapidocr 3.x — `arr or []` raises
+    # the ambiguous-truth ValueError; go through explicit None checks.
+    raw_scores = getattr(result, "scores", None)
+    scores = list(raw_scores) if raw_scores is not None else []
+    raw_boxes = getattr(result, "boxes", None)
+    boxes = list(raw_boxes) if raw_boxes is not None else []
     blocks = []
     for i, text in enumerate(txts):
         if not text or not str(text).strip():
