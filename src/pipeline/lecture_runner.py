@@ -38,6 +38,7 @@ threads pick up refreshed cookies through the shared ``ICourseClient``.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import time
@@ -496,6 +497,30 @@ class LectureRunner:
                 pass
         return None
 
+    def _download_ppt_json(self, sub_id: str, url: str):
+        """Fetch injected slide text [{"created_sec": int, "text": str}, ...]
+        and return it in the same shape as get_done_ppt_pages.  Returns None
+        on any failure so the caller keeps the platform's pages."""
+        try:
+            with urlopen(url, timeout=60) as r:
+                data = json.loads(r.read().decode("utf-8"))
+            pages = [
+                {"page_num": i, "created_sec": int(p["created_sec"]),
+                 "text": p["text"]}
+                for i, p in enumerate(data)
+                if isinstance(p, dict) and p.get("text")
+            ]
+            self._reporter.info(
+                f"    [Injected PPT] {len(pages)} slides from injected asset"
+            )
+            return pages
+        except Exception as e:
+            self._reporter.info(
+                f"    [Injected PPT] failed ({type(e).__name__}: {e}) — "
+                f"using platform PPT pages"
+            )
+            return None
+
     def _retry_alternate_videos(self, sub_id: str, course_id: str,
                                 handle, transcript: str,
                                 segments) -> tuple[str, list]:
@@ -568,6 +593,16 @@ class LectureRunner:
                    transcript_segments: list[dict] | None) -> Optional[str]:
         try:
             kept_pages = self._db.get_done_ppt_pages(sub_id)
+            # Injected slide text (force_audio/<sub_id>.json "ppt_url")
+            # replaces the platform's screenshot OCR when the platform
+            # capture was broken (664140: all 98 screenshots were garbage
+            # screens; the real slides were OCR'd from the video file the
+            # user downloaded from the intranet instead).
+            asset = config.FORCE_AUDIO_MAP.get(sub_id)
+            if asset and asset.get("ppt_url"):
+                injected = self._download_ppt_json(sub_id, asset["ppt_url"])
+                if injected:
+                    kept_pages = injected
             prompt_text, mode = bucketer.assemble(
                 transcript, transcript_segments, kept_pages,
             )
