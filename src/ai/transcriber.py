@@ -371,6 +371,20 @@ class Transcriber:
             count += 1
         return count
 
+    def decode_chunk(self, samples) -> str:
+        """Decode one block of 16 kHz float32 PCM directly with the
+        recognizer, bypassing VAD gating entirely.  Used by the one-off
+        [ASR probe] forensics to decide whether near-inaudible speech is
+        present in a recording the VAD never fires on.  Returns the
+        recognized text (possibly empty, or a model hallucination on
+        speechless input — which is itself the diagnostic answer)."""
+        self._init()
+        stream = self._recognizer.create_stream()
+        stream.accept_waveform(SAMPLE_RATE,
+                               np.asarray(samples, dtype=np.float32))
+        self._recognizer.decode_stream(stream)
+        return _postprocess_segment(stream.result.text)
+
     # ── Shared consumer core ────────────────────────────────────────────
 
     def _consume_pcm_stream(

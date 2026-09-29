@@ -334,7 +334,7 @@ class LectureRunner:
         # audio track on the WebVPN egress; see 泛函分析 664140).  Takes
         # precedence over both the official transcript and the video path.
         asset = config.FORCE_AUDIO_MAP.get(sub_id)
-        if asset:
+        if asset and not asset.get("asr_test"):
             injected = self._transcribe_injected_audio(sub_id, asset)
             if injected is not None:
                 transcript, segments = injected

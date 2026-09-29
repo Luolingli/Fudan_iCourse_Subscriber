@@ -278,6 +278,41 @@ def _crawl_semester_catalog(client: ICourseClient, db: Database,
     reporter.info("Semester catalog crawl complete.")
 
 
+def _run_asr_probes(transcriber, reporter) -> None:
+    """One-off forensics for force_audio entries flagged asr_test: chunk-
+    decode their audio asset (16 kHz mono f32le raw) with the recognizer
+    directly — VAD is bypassed entirely — and log the text per 5 s chunk.
+    Lecture rows are untouched.  Used to decide whether near-inaudible
+    speech exists in a recording the VAD never fires on (664140, 09-29).
+    """
+    import numpy as np
+    from urllib.request import urlopen
+    from src.ai.transcriber import SAMPLE_RATE
+    probes = {k: v for k, v in config.FORCE_AUDIO_MAP.items()
+              if v.get("asr_test")}
+    for sid, entry in probes.items():
+        try:
+            reporter.info(f"[ASR probe] {sid}: downloading asset ...")
+            with urlopen(entry["url"], timeout=300) as r:
+                buf = np.frombuffer(r.read(), dtype=np.float32)
+            step = 5 * SAMPLE_RATE
+            for i in range((len(buf) + step - 1) // step):
+                chunk = buf[i * step:(i + 1) * step]
+                if not len(chunk):
+                    break
+                rms = float(np.sqrt(
+                    (chunk.astype(np.float64) ** 2).mean()))
+                text = transcriber.decode_chunk(chunk)
+                reporter.info(
+                    f"[ASR probe] {sid} chunk@{i * 5:02d}s "
+                    f"rms={rms:.4f}: {text!r}"
+                )
+        except Exception as e:
+            reporter.info(
+                f"[ASR probe] {sid} failed: {type(e).__name__}: {e}"
+            )
+
+
 def run():
     """Single execution of the full pipeline."""
     reporter = Reporter()
@@ -301,6 +336,7 @@ def run():
             else:
                 reporter.info(f"[Force] lecture {sid} not found, nothing to reset")
     transcriber = Transcriber()
+    _run_asr_probes(transcriber, reporter)
     summarizer = Summarizer() if config.COURSE_IDS else None
     emailer = Emailer() if (
         config.SMTP_EMAIL and config.SMTP_PASSWORD
