@@ -285,6 +285,7 @@ def _run_asr_probes(transcriber, reporter) -> None:
     Lecture rows are untouched.  Used to decide whether near-inaudible
     speech exists in a recording the VAD never fires on (664140, 09-29).
     """
+    import os
     import numpy as np
     from urllib.request import urlopen
     from src.ai.transcriber import SAMPLE_RATE
