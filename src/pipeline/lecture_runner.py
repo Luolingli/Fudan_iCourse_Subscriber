@@ -455,12 +455,20 @@ class LectureRunner:
                 f" head-60s-rms={rms:.5f} vad_canary={canary}"
             )
             if rms < 1e-4 or canary == 0:
+                # Deterministic failure — the video path cannot do better
+                # (known-broken file), so record the diagnosis and skip it
+                # instead of burning another 3+ minutes.
+                reason = (f"asset silent (rms={rms:.2e})"
+                          if rms < 1e-4 else
+                          f"VAD canary fired 0 times on 60 s of known "
+                          f"speech — VAD/model broken on this runner")
                 self._reporter.info(
-                    f"    [Injected audio] SELF-CHECK FAILED — file silent "
-                    f"or VAD broken on this runner; aborting before full "
-                    f"ASR"
+                    f"    [Injected audio] SELF-CHECK FAILED — {reason}; "
+                    f"skipping video path"
                 )
-                return None
+                self._db.update_error(
+                    sub_id, "injected_audio", reason)
+                raise RuntimeError(f"Injected audio self-check failed: {reason}")
             fake_proc = types.SimpleNamespace(
                 poll=lambda: 0, returncode=0)
             transcript, segments = self._transcriber.transcribe_tail(

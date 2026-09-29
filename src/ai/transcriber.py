@@ -365,7 +365,11 @@ class Transcriber:
         if idx < n:
             canary.accept_waveform(arr[idx:])
         canary.flush()
-        return int(canary.num_speeches)
+        count = 0
+        while not canary.empty():
+            canary.pop()
+            count += 1
+        return count
 
     # ── Shared consumer core ────────────────────────────────────────────
 
