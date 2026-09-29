@@ -109,6 +109,21 @@ class LectureRunner:
                 return None
             return existing["summary"]
 
+        # ── Phase A2 — skip lectures still in the pre-release review
+        # gate (审核中).  The platform serves placeholder artifacts in
+        # the pre-release slot (operation-guide PPT screenshot + a
+        # dead-audio video copy), so anything processed now is junk that
+        # would mark the lecture done and block the real video.  No
+        # processed mark, no error — the lecture stays "waiting" and is
+        # re-checked on every run (one cheap API call) until released.
+        if self._client.is_release_gated(course_id, sub_id):
+            self._reporter.info(
+                f"    Video under review (审核中) — skipping, "
+                f"will retry after release."
+            )
+            self._schedule_next(next_info)
+            return None
+
         # ── Phase B — submit PPT pipeline (fetch + dedup, no OCR yet) ──
         # OCR is deferred (defer_ocr=True) so ASR in Phase D gets exclusive
         # CPU.  OCR will be submitted in Phase E (handle.drain()).

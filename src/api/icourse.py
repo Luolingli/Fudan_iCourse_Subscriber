@@ -463,6 +463,37 @@ class ICourseClient:
 
         return payload
 
+    def is_release_gated(self, course_id: str, sub_id: str) -> bool:
+        """True while the lecture's video is still in the pre-release
+        review gate (get-sub-info code 7001 "视频未到开放时间" / 审核中).
+
+        During the gate the platform serves PLACEHOLDER artifacts in the
+        playback slots — an operation-guide screenshot for PPT and a
+        dead-audio copy of the video for playback (see 泛函分析 669943:
+        the 2026-09-28 第3-5节 lecture produced a 30-char "录像操作指南"
+        summary from the placeholder PPT page while still 审核中).  The
+        pipeline must skip such lectures entirely until release, or the
+        placeholder gets summarized and marked done, blocking the real
+        video.
+        """
+        try:
+            url = (
+                f"{self.base_url}"
+                f"/courseapi/v3/portal-home-setting/get-sub-info"
+            )
+            resp = self.vpn.get(url, params={
+                "course_id": course_id, "sub_id": sub_id
+            })
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("code") == 7001:
+                return True
+            msg = str(data.get("msg") or "")
+            return ("未到开放" in msg) or ("审核" in msg)
+        except Exception:
+            # API hiccup must not block a released lecture's processing.
+            return False
+
     def get_video_url(self, course_id: str, sub_id: str) -> str | None:
         """Get the primary signed MP4 video URL for a specific lecture.
 
