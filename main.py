@@ -292,18 +292,29 @@ def _run_asr_probes(transcriber, reporter) -> None:
               if v.get("asr_test")}
     for sid, entry in probes.items():
         try:
-            reporter.info(f"[ASR probe] {sid}: downloading asset ...")
-            with urlopen(entry["url"], timeout=1800) as r:
-                raw = r.read()
-            if entry["url"].split("?")[0].endswith(".f32"):
-                buf = np.frombuffer(raw, dtype=np.float32)
-            else:
+            # "url" may be a single asset or an ordered list of small parts
+            # (long uploads from this uplink get RST mid-stream, so a whole
+            # lecture is shipped as ~5 MB slices that each survive).
+            import subprocess
+            import tempfile
+            urls = entry["url"]
+            if isinstance(urls, str):
+                urls = [urls]
+            parts = []
+            for u in urls:
+                reporter.info(
+                    f"[ASR probe] {sid}: downloading part "
+                    f"{len(parts) + 1}/{len(urls)} ..."
+                )
+                with urlopen(u, timeout=1800) as r:
+                    raw = r.read()
+                if u.split("?")[0].endswith(".f32"):
+                    parts.append(np.frombuffer(raw, dtype=np.float32))
+                    continue
                 # any container ffmpeg understands (opus/mp3/m4a…) decoded to
                 # 16 kHz mono f32le — lets probes ship as tiny lossy-audio
                 # assets instead of raw PCM hundreds of MB big.
-                import subprocess
-                import tempfile
-                suffix = os.path.splitext(entry["url"].split("?")[0])[1] or ".bin"
+                suffix = os.path.splitext(u.split("?")[0])[1] or ".bin"
                 with tempfile.NamedTemporaryFile(suffix=suffix,
                                                  delete=False) as tf:
                     tf.write(raw)
@@ -323,10 +334,11 @@ def _run_asr_probes(transcriber, reporter) -> None:
                     raise RuntimeError(
                         "ffmpeg decode failed: "
                         + p.stderr[-200:].decode(errors="replace"))
-                buf = np.frombuffer(p.stdout, dtype=np.float32)
+                parts.append(np.frombuffer(p.stdout, dtype=np.float32))
+            buf = np.concatenate(parts) if len(parts) > 1 else parts[0]
             reporter.info(
                 f"[ASR probe] {sid} audio ready: "
-                f"{len(buf) / SAMPLE_RATE:.1f}s from {len(raw)} B"
+                f"{len(buf) / SAMPLE_RATE:.1f}s from {len(parts)} part(s)"
             )
             # 15 s windows on a 12 s stride (3 s overlap) — long enough to
             # carry a sentence across chunk seams, overlap means a word
