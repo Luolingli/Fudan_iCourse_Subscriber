@@ -37,6 +37,7 @@ threads pick up refreshed cookies through the shared ``ICourseClient``.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import time
@@ -44,6 +45,8 @@ import types
 from typing import TYPE_CHECKING, Optional
 from urllib.parse import urlparse
 from urllib.request import urlopen
+
+import numpy as np
 
 from src.ai import bucketer
 from src.pipeline.ppt_pipeline import PPTPipeline
@@ -433,6 +436,31 @@ class LectureRunner:
             os.makedirs(config.AUDIO_DIR, exist_ok=True)
             with urlopen(url, timeout=900) as r, open(path, "wb") as f:
                 shutil.copyfileobj(r, f)
+            # Pre-ASR self-check: prove what this machine actually got, so
+            # a future 0-segment failure is diagnosable from the log alone
+            # (2026-09-29: a byte-verified audio asset transcribed to 0
+            # segments in ~25 s — faster than a full VAD pass could take —
+            # on one CI runner).
+            with open(path, "rb") as f:
+                digest = hashlib.sha256(
+                    b"".join(iter(lambda: f.read(1 << 20), b""))
+                ).hexdigest()
+            with open(path, "rb") as f:
+                head = f.read(60 * 16000 * 4)
+            head_samples = np.frombuffer(head, dtype=np.float32)
+            rms = float(np.sqrt((head_samples.astype(np.float64) ** 2).mean()))
+            canary = self._transcriber.vad_canary(head_samples)
+            self._reporter.info(
+                f"    [Injected audio] self-check: sha256={digest[:16]}…"
+                f" head-60s-rms={rms:.5f} vad_canary={canary}"
+            )
+            if rms < 1e-4 or canary == 0:
+                self._reporter.info(
+                    f"    [Injected audio] SELF-CHECK FAILED — file silent "
+                    f"or VAD broken on this runner; aborting before full "
+                    f"ASR"
+                )
+                return None
             fake_proc = types.SimpleNamespace(
                 poll=lambda: 0, returncode=0)
             transcript, segments = self._transcriber.transcribe_tail(

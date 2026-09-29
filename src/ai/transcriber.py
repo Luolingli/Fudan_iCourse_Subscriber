@@ -346,6 +346,27 @@ class Transcriber:
                     "text": text,
                 })
 
+    def vad_canary(self, samples) -> int:
+        """Diagnostic: feed samples to a throwaway VAD and return how many
+        speech segments it reports.  A healthy VAD fires on real speech, so
+        0 on a known-speech clip indicates a broken VAD/model on this
+        machine.  Uses its own VAD instance — the pipeline's running state
+        is untouched — and performs no recognition."""
+        self._init()
+        canary = sherpa_onnx.VoiceActivityDetector(
+            self._vad_config, buffer_size_in_seconds=120
+        )
+        arr = np.asarray(samples, dtype=np.float32)
+        idx = 0
+        n = len(arr)
+        while idx + WINDOW_SIZE <= n:
+            canary.accept_waveform(arr[idx:idx + WINDOW_SIZE])
+            idx += WINDOW_SIZE
+        if idx < n:
+            canary.accept_waveform(arr[idx:])
+        canary.flush()
+        return int(canary.num_speeches)
+
     # ── Shared consumer core ────────────────────────────────────────────
 
     def _consume_pcm_stream(
