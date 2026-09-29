@@ -1,7 +1,6 @@
 {
   "sub_id": "664140",
-  "url": "https://github.com/Luolingli/Fudan_iCourse_Subscriber/releases/download/fa-injected-audio-664140-hp/fa_664140_hp.f32",
   "ppt_url": "https://github.com/Luolingli/Fudan_iCourse_Subscriber/releases/download/fa-injected-slides-664140/fa_664140_slides.json",
-  "note": "2026-09-29: 泛函分析 2026-09-21第3-5节. Platform PPT capture was garbage (98/98 screens); WebVPN video copies have dead audio. Source recording is healthy on the intranet but buried under a 50Hz mains hum (94% of energy <300Hz, speech 22dB below) which silences silero VAD. Assets: (1) audio = intranet aac track, 120Hz butterworth highpass + iirnotch 150/250/350/450 Q40, normalized rms 0.03 (low-band 94%->2.2%); (2) slides = 310 frames @25s from the intranet video, dhash-deduped, RapidOCR + clean_ppt_text. Delete entries + releases once the summary is out.",
+  "note": "泛函分析 2026-09-21第3-5节 (2026-09-29 final): recording's audio track contains NO speech (verified by silero VAD at thr 0.1 on two independent decoders, envelope/AM stats, and a VAD-free SenseVoice probe on the user-located 2675-2679s window — all negative; the perceived voice was auditory imagery). Platform PPT capture was also garbage (98/98 noise screens). Recovered content = 310 board slides OCR'd from the intranet video frames (this asset). Summary is board-only, 28403 chars. Keep ppt_url so a future force re-run reproduces the board-only summary.",
   "extracted_at": "2026-09-29"
 }

@@ -1,6 +1,0 @@
-{
-  "sub_id": "probe664140a",
-  "url": "https://github.com/Luolingli/Fudan_iCourse_Subscriber/releases/download/asr-probe-664140-44m30/fa_asr_probe.f32",
-  "asr_test": true,
-  "note": "One-off VAD-free ASR forensics (2026-09-29): 30 s probe = 15 s of the user-located window (clip 20-24s = file 2675-2679s, as-heard mp3 decode) + 15 s notched/normalized copy. User reports hearing a full sentence there; all file-wide stats say speechless. Delete after verdict."
-}
