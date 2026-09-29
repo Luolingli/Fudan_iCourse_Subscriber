@@ -1,6 +1,6 @@
 {
  "sub_id": "probe-full",
- "url": "https://github.com/Luolingli/Fudan_iCourse_Subscriber/releases/download/asr-probe-664140-v2/fa_full_raw.f32",
+ "url": "https://github.com/Luolingli/Fudan_iCourse_Subscriber/releases/download/asr-probe-664140-v3/fa_full_probe.opus",
  "asr_test": true,
- "note": "decisive: WHOLE 664140 audio unfiltered (as-heard), VAD-free SenseVoice decode, 15 s win / 12 s hop, non-empty chunks logged with file timestamp. User locates intelligible speech at 2675-2679 s."
+ "note": "decisive: WHOLE 664140 audio unfiltered (as-heard), VAD-free SenseVoice decode, 15 s win / 12 s hop, non-empty chunks logged with file timestamp. User locates intelligible speech at 2675-2679 s. v3: opus 32k voip (52 MB) instead of raw PCM (596 MB) — same audio, 1/12 the upload; CI decodes via ffmpeg."
 }

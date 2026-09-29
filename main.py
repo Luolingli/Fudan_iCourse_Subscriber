@@ -294,7 +294,40 @@ def _run_asr_probes(transcriber, reporter) -> None:
         try:
             reporter.info(f"[ASR probe] {sid}: downloading asset ...")
             with urlopen(entry["url"], timeout=1800) as r:
-                buf = np.frombuffer(r.read(), dtype=np.float32)
+                raw = r.read()
+            if entry["url"].split("?")[0].endswith(".f32"):
+                buf = np.frombuffer(raw, dtype=np.float32)
+            else:
+                # any container ffmpeg understands (opus/mp3/m4a…) decoded to
+                # 16 kHz mono f32le — lets probes ship as tiny lossy-audio
+                # assets instead of raw PCM hundreds of MB big.
+                import subprocess
+                import tempfile
+                suffix = os.path.splitext(entry["url"].split("?")[0])[1] or ".bin"
+                with tempfile.NamedTemporaryFile(suffix=suffix,
+                                                 delete=False) as tf:
+                    tf.write(raw)
+                    tmp = tf.name
+                try:
+                    p = subprocess.run(
+                        ["ffmpeg", "-hide_banner", "-v", "error", "-i", tmp,
+                         "-ar", str(SAMPLE_RATE), "-ac", "1",
+                         "-f", "f32le", "-"],
+                        capture_output=True, timeout=900)
+                finally:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                if p.returncode != 0:
+                    raise RuntimeError(
+                        "ffmpeg decode failed: "
+                        + p.stderr[-200:].decode(errors="replace"))
+                buf = np.frombuffer(p.stdout, dtype=np.float32)
+            reporter.info(
+                f"[ASR probe] {sid} audio ready: "
+                f"{len(buf) / SAMPLE_RATE:.1f}s from {len(raw)} B"
+            )
             # 15 s windows on a 12 s stride (3 s overlap) — long enough to
             # carry a sentence across chunk seams, overlap means a word
             # straddling a boundary is caught whole by one of them.
