@@ -1,0 +1,6 @@
+{
+  "sub_id": "664140",
+  "url": "https://github.com/Luolingli/Fudan_iCourse_Subscriber/releases/download/fa-injected-audio-664140/fa_664140_16k.f32",
+  "note": "2026-09-29: WebVPN egress copy of the video has a dead audio track (5/5 silent, 3 full-length); intranet copy healthy. Audio extracted locally from the intranet download (stream 1, aac), 16 kHz mono f32le raw, 02:42:45. Delete this entry and the release after the summary is out.",
+  "extracted_at": "2026-09-29"
+}

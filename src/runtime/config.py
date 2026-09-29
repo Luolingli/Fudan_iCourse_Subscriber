@@ -1,4 +1,5 @@
 import os
+import json
 import socket
 
 # Force IPv4 resolution globally to prevent "Network is unreachable" socket errors
@@ -215,3 +216,31 @@ FORCE_SUB_IDS = [
     for s in os.environ.get("FORCE_SUB_IDS", "").split(",")
     if s.strip()
 ]
+
+# 手动注入的音频资产。当某节录播在 iCourse 侧的视频文件坏了（如 泛函分析
+# 664140：WebVPN 出口拿到的对象音轨是死的，校园网出口正常），可人工从健康
+# 出口下载视频，抽出 16kHz 单声道 f32le 原始 PCM（与 CI 的 ffmpeg 输出同
+# 格式，无头），传成 release 资产后在 force_audio/<sub_id>.json 登记：
+#   {"sub_id": "664140", "url": "https://.../<asset>"}
+# LectureRunner 取转录前优先使用注入音频，跳过坏视频下载。
+def _load_force_audio() -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    d = os.path.join(os.getcwd(), "force_audio")
+    if os.path.isdir(d):
+        for name in sorted(os.listdir(d)):
+            if not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(d, name)) as f:
+                    entry = json.load(f)
+                url = entry.get("url")
+                if not isinstance(url, str) or not url:
+                    continue
+                sid = str(entry.get("sub_id") or name.rsplit(".", 1)[0])
+                out[sid] = entry
+            except Exception:
+                continue
+    return out
+
+
+FORCE_AUDIO_MAP: dict[str, dict] = _load_force_audio()

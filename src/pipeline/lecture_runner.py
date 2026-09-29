@@ -37,9 +37,13 @@ threads pick up refreshed cookies through the shared ``ICourseClient``.
 
 from __future__ import annotations
 
+import os
+import shutil
 import time
+import types
 from typing import TYPE_CHECKING, Optional
 from urllib.parse import urlparse
+from urllib.request import urlopen
 
 from src.ai import bucketer
 from src.pipeline.ppt_pipeline import PPTPipeline
@@ -287,6 +291,18 @@ class LectureRunner:
             )
             return existing["transcript"], None
 
+        # Manually injected audio (force_audio/<sub_id>.json) — authoritative
+        # when the server-side video file for this lecture is broken (dead
+        # audio track on the WebVPN egress; see 泛函分析 664140).  Takes
+        # precedence over both the official transcript and the video path.
+        asset = config.FORCE_AUDIO_MAP.get(sub_id)
+        if asset:
+            injected = self._transcribe_injected_audio(sub_id, asset)
+            if injected is not None:
+                transcript, segments = injected
+                self._db.update_transcript(sub_id, transcript)
+                return transcript, segments
+
         # Try official transcript before firing up ASR (config-gated).
         if config.USE_OFFICIAL_TRANSCRIPT:
             try:
@@ -380,6 +396,54 @@ class LectureRunner:
 
         self._db.update_transcript(sub_id, transcript)
         return transcript, segments
+
+    def _transcribe_injected_audio(self, sub_id: str,
+                                   asset: dict) -> tuple[str, list] | None:
+        """Download and ASR a manually injected 16 kHz mono f32le audio
+        asset (see config.FORCE_AUDIO_MAP).  The file has no header — same
+        format the CI's ffmpeg writes — so transcribe_tail can consume it
+        with an already-exited process; the completeness check is skipped
+        because no media duration is known.
+
+        Returns (transcript, segments), or None on any failure / empty
+        result so the caller falls back to the normal video path.
+        """
+        url = asset["url"]
+        path = os.path.join(config.AUDIO_DIR, f"{sub_id}.injected.f32")
+        try:
+            self._reporter.info(
+                f"    [Injected audio] downloading "
+                f"{os.path.basename(url)} for {sub_id} ..."
+            )
+            os.makedirs(config.AUDIO_DIR, exist_ok=True)
+            with urlopen(url, timeout=900) as r, open(path, "wb") as f:
+                shutil.copyfileobj(r, f)
+            fake_proc = types.SimpleNamespace(
+                poll=lambda: 0, returncode=0)
+            transcript, segments = self._transcriber.transcribe_tail(
+                path, fake_proc, [], timeout=7200)
+            if transcript.strip():
+                self._reporter.info(
+                    f"    [Injected audio] OK: "
+                    f"{len(transcript)} chars, {len(segments)} segments"
+                )
+                return transcript, segments
+            self._reporter.info(
+                "    [Injected audio] transcribed empty — "
+                "falling back to video path"
+            )
+        except Exception as e:
+            self._reporter.info(
+                f"    [Injected audio] failed ({type(e).__name__}: {e}) "
+                f"— falling back to video path"
+            )
+        finally:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
+        return None
 
     def _retry_alternate_videos(self, sub_id: str, course_id: str,
                                 handle, transcript: str,
