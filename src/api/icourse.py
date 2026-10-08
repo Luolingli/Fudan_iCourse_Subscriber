@@ -733,6 +733,7 @@ class ICourseClient:
         streaming fallback (partial).
         """
         total = 0
+        ident_logged = False
         for _attempt in range(max_attempts):
             try:
                 have = (os.path.getsize(output_path)
@@ -759,6 +760,23 @@ class ICourseClient:
                     elif cl:
                         total = int(cl)
                         have = 0
+                    if not ident_logged:
+                        # Object identity for egress forensics: comparing
+                        # size+etag against the browser's view of the same
+                        # URL answers whether the platform serves ONE file
+                        # (our streams just die early) or a different,
+                        # silent PROXY object to non-media-stack clients.
+                        # Browser truth sample (669978, 2026-10-08):
+                        #   content-length 2686401109, etag
+                        #   "6ab9f312-a01f3a55" (hex tail == size).
+                        ident_logged = True
+                        print(
+                            f"    [obj] status={resp.status_code} "
+                            f"total={total} "
+                            f"etag={resp.headers.get('etag')} "
+                            f"accept-ranges={resp.headers.get('accept-ranges')}",
+                            flush=True,
+                        )
                     with open(output_path, mode) as f:
                         if mode == "wb":
                             f.truncate(0)
