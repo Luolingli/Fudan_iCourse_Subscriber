@@ -299,3 +299,12 @@ BOARD_MAX_PAGES = int(os.environ.get("BOARD_MAX_PAGES", "260"))
 # 全哑 → 放行（板书兜底从真实画面抢救内容）。置 0 关闭。
 AUDIO_GATE = os.environ.get("AUDIO_GATE", "1").strip().lower() not in ("0", "false", "no", "")
 AUDIO_GATE_MAX_DAYS = int(os.environ.get("AUDIO_GATE_MAX_DAYS", "7"))
+# 按课程"无限等待活音轨"名单（逗号分隔 course_id，默认 37547=泛函分析）：
+# 名单内课程即使哑超过 GATE_MAX_DAYS 也**不走板书妥协**——老师口述权重高，
+# 宁可一直挂着（就绪闸每日重探、前端 Waiting、零配额消耗）也不出只有板书
+# 的半份摘要；学校把真混流推上 CDN 的那天，自动出完整音频+板书摘要。
+HOLD_WAIT_AUDIO_COURSES = [
+    s.strip()
+    for s in os.environ.get("HOLD_WAIT_AUDIO_COURSES", "37547").split(",")
+    if s.strip()
+]

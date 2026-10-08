@@ -429,6 +429,16 @@ class LectureRunner:
                     f"max={res['max']:.4f}≈median={res['median']:.4f} "
                     f"speech_frac={res['speech_frac']:.0%}")
         age = _lecture_age_days(date)
+        if str(course_id) in config.HOLD_WAIT_AUDIO_COURSES:
+            self._db.set_waiting(
+                sub_id, "waiting_audio",
+                "silent audio on all variants — course held indefinitely "
+                "for the real mix (HOLD_WAIT_AUDIO_COURSES)")
+            self._reporter.info(
+                "    [Gate] held indefinitely (HOLD_WAIT_AUDIO_COURSES): "
+                "board-only compromise disabled for this course — re-probed "
+                "daily until live audio lands on the CDN.")
+            return None, False
         if age is None or age >= config.AUDIO_GATE_MAX_DAYS:
             self._reporter.info(
                 f"    [Gate] all variants silent and lecture "
