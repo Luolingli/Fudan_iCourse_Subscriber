@@ -329,6 +329,21 @@ class Database:
                 (stage, error_msg, sub_id),
             )
 
+    def set_waiting(self, sub_id: str, stage: str, msg: str):
+        """Soft 'not ready yet' state: rendered as Waiting on the frontend,
+        NEVER counts toward the error budget (error_count pinned to 0) —
+        the lecture re-enters every run until a real outcome replaces it.
+        For platform-side incompleteness (silent audio mix, missing
+        artifacts) that heals on its own, unlike update_error which is
+        for failures of OUR pipeline."""
+        with self._lock, self.conn:
+            self.conn.execute(
+                """UPDATE lectures
+                   SET error_stage = ?, error_msg = ?, error_count = 0
+                   WHERE sub_id = ?""",
+                (stage, msg, str(sub_id)),
+            )
+
     def clear_error(self, sub_id: str):
         """Clear error state after successful processing."""
         with self._lock, self.conn:

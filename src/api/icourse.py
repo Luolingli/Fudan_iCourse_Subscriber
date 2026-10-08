@@ -596,6 +596,26 @@ class ICourseClient:
                   f"playurl, content.playback, sub_detail)")
             return []
 
+        # Browser-playback path variants, appended AFTER filename dedup on
+        # purpose: the player serves files under /play/1/defaultnew/<date>/
+        # <name>.mp4 while the API metadata exposes the storage path — same
+        # basename, potentially a different physical object (the browser
+        # copy of 泛函分析 669978 carries live audio where the storage-path
+        # object served a dead track).  Each is a legitimate alternate for
+        # the zero-speech variant retry, and probes can A/B them directly.
+        play_extra: list[tuple[str, str]] = []
+        for base, src in base_urls:
+            parsed = urlparse(base)
+            if "/play/1/" in parsed.path:
+                continue
+            m = re.search(r"(\d{4}-\d{2}-\d{2})/([^/?]+\.mp4)", parsed.path)
+            if not m:
+                continue
+            play = (f"{parsed.scheme}://{parsed.netloc}/play/1/defaultnew"
+                    f"/{m.group(1)}/{m.group(2)}")
+            play_extra.append((play, f"playback[{src}]"))
+        base_urls += play_extra
+
         # Log the selected variant and the other available files.
         # Picking a variant whose transcode has a dead audio track yields a
         # full-length file with zero speech — this line is what pinpoints

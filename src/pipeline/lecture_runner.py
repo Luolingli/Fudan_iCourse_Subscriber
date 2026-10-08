@@ -52,7 +52,11 @@ import numpy as np
 from src.ai import bucketer
 from src.pipeline import board_frames
 from src.pipeline.ppt_pipeline import PPTPipeline
-from src.ai.transcriber import IncompleteAudioError, NoAudioStreamError
+from src.ai.transcriber import (
+    IncompleteAudioError,
+    NoAudioStreamError,
+    probe_audio,
+)
 from src.runtime import config
 
 if TYPE_CHECKING:
@@ -62,6 +66,16 @@ if TYPE_CHECKING:
     from src.runtime.scheduler import Scheduler
     from src.ai.summarizer import Summarizer
     from src.ai.transcriber import Transcriber
+
+
+def _lecture_age_days(date_str: str) -> int | None:
+    """Whole days between the lecture date (YYYY-MM-DD prefix tolerated)
+    and now; None when unparseable (callers treat unknown as old)."""
+    try:
+        struct = time.strptime(str(date_str)[:10], "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return None
+    return max(0, int((time.time() - time.mktime(struct)) // 86400))
 
 
 class LectureRunner:
@@ -85,6 +99,9 @@ class LectureRunner:
         # Slide pages (platform-done or injected) per sub_id, shared between
         # the Phase F content check and _summarize; fetched at most once.
         self._pages_cache: dict[str, list[dict]] = {}
+        # Live-audio variant chosen by the Phase A3 readiness probe for the
+        # CURRENT lecture (None → use the server default).  Reset per run().
+        self._gate_video_url: Optional[str] = None
 
     # ── Public entry point ──────────────────────────────────────────────
 
@@ -131,6 +148,26 @@ class LectureRunner:
             )
             self._schedule_next(next_info)
             return None
+
+        # ── Phase A3 — audio-readiness gate (config-gated) ─────────────
+        # Review-lifting (A2) does not guarantee the served bytes are the
+        # final cut: the platform can expose video_list/playback objects
+        # whose AUDIO track is still the pre-mix silent copy (泛函分析
+        # 9.21/9.28) for days.  A cheap streaming audio probe (a 120s window
+        # per variant, no full download, no ASR model) tells placeholder
+        # from real lecture audio BEFORE we spend a slot + LLM on it.
+        # Silent-and-recent → soft Waiting (error_count stays 0, re-probed
+        # daily, nothing half-broken enters the flow).  Silent-but-old →
+        # proceed anyway so the board-from-video fallback can still salvage
+        # the real blackboard frames.  Live → that variant's URL is reused
+        # directly for ASR + board extraction (the dual-line-healthy path).
+        self._gate_video_url = None
+        if config.AUDIO_GATE:
+            live_url, ready = self._audio_readiness(course_id, sub_id, date)
+            self._gate_video_url = live_url
+            if not ready:
+                self._schedule_next(next_info)
+                return None
 
         # ── Phase B — submit PPT pipeline (fetch + dedup, no OCR yet) ──
         # OCR is deferred (defer_ocr=True) so ASR in Phase D gets exclusive
@@ -306,7 +343,7 @@ class LectureRunner:
         are logged, never raised — the caller degrades to the retriable-
         error path)."""
         asset = config.FORCE_AUDIO_MAP.get(sub_id)
-        injected = (asset or {}).get("video_url")
+        injected = (asset or {}).get("video_url") or self._gate_video_url
         try:
             video_url = injected or self._client.get_video_url(
                 course_id, sub_id)
@@ -334,6 +371,78 @@ class LectureRunner:
                 f"{type(e).__name__}: {e}"
             )
             return 0
+
+    def _audio_readiness(self, course_id: str, sub_id: str,
+                         date: str) -> tuple[Optional[str], bool]:
+        """Phase A3 gate — (live_variant_url, proceed).
+
+        Streams a 120 s window of every video variant (default storage
+        paths first, then the /play/1/ playback paths appended by
+        get_video_url_candidates) through ffmpeg and measures audio
+        dynamics.  Returns as soon as one variant shows speech-like
+        content: variant #0 live → (None, True) so the Phase C prefetch
+        keeps streaming the default untouched; a later variant live →
+        its URL so ASR + board extraction switch to the healthy object.
+        All-silent is the platform's pre-mix signature (9.21/9.28 kept
+        serving flat noise floors days after the review gate lifted):
+        recent lectures get a soft Waiting state that never consumes
+        the error budget and is re-probed daily; lectures older than
+        AUDIO_GATE_MAX_DAYS are almost certainly permanently silent
+        recordings (the 664140 class) and proceed so the board fallback
+        can recover their real blackboard frames.
+        """
+        try:
+            candidates = self._client.get_video_url_candidates(
+                course_id, sub_id)
+        except Exception as e:
+            self._reporter.info(
+                f"    [Gate] candidates unavailable "
+                f"({type(e).__name__}) — proceeding without gate."
+            )
+            return None, True
+        if not candidates:
+            return None, True  # the no_video path in _get_transcript decides
+        for i, url in enumerate(candidates[:6]):
+            try:
+                vpn_url, headers = self._client.get_stream_params(url)
+                res = probe_audio(vpn_url, headers)
+            except Exception as e:
+                self._reporter.info(
+                    f"    [Gate] probe #{i} error: "
+                    f"{type(e).__name__}: {e}")
+                continue
+            name = url.split("?", 1)[0].rsplit("/", 1)[-1][:28]
+            if res["ok"]:
+                self._reporter.info(
+                    f"    [Gate] variant #{i} ({name}) LIVE: "
+                    f"speech_frac={res['speech_frac']:.0%} "
+                    f"max={res['max']:.4f} median={res['median']:.4f} "
+                    f"@{res['position']}s")
+                return (None if i == 0 else url), True
+            if res["error"]:
+                self._reporter.info(
+                    f"    [Gate] variant #{i} ({name}) inconclusive: "
+                    f"{res['error']}")
+            else:
+                self._reporter.info(
+                    f"    [Gate] variant #{i} ({name}) SILENT: "
+                    f"max={res['max']:.4f}≈median={res['median']:.4f} "
+                    f"speech_frac={res['speech_frac']:.0%}")
+        age = _lecture_age_days(date)
+        if age is None or age >= config.AUDIO_GATE_MAX_DAYS:
+            self._reporter.info(
+                f"    [Gate] all variants silent and lecture "
+                f"{age if age is not None else '?'}d old — proceeding "
+                f"(permanent silent recording? board fallback will try).")
+            return None, True
+        self._db.set_waiting(
+            sub_id, "waiting_audio",
+            "all video variants carry a silent audio track "
+            "(platform mix pending)")
+        self._reporter.info(
+            "    [Gate] silent on all variants — held as Waiting "
+            "(re-probed daily, no error budget consumed).")
+        return None, False
 
     def prefetch_first(self, course_id: str, sub_id: str) -> None:
         """Prefetch for the first lecture in the batch — same decision
@@ -479,16 +588,23 @@ class LectureRunner:
         asset = config.FORCE_AUDIO_MAP.get(sub_id)
         injected_video = (asset or {}).get("video_url") if (
             asset and not asset.get("asr_test")) else None
-        if injected_video:
-            # Phase C may already have scheduled the SERVER url for this
-            # lecture; kill that spawn so schedule() accepts the override.
+        # The readiness probe may have identified a LIVE variant among the
+        # candidates (often the /play/1/ playback path when the storage
+        # paths serve silent copies); reuse it instead of the default.
+        chosen_video = injected_video or self._gate_video_url
+        if chosen_video:
+            # Phase C may already have scheduled a spawn for this sub_id;
+            # kill it so schedule() accepts the override (idempotent gate
+            # choices equal to the default URL cost nothing extra).
             self._release_audio(sub_id)
             self._reporter.info(
                 "    [Inject] using healthy video copy for ASR "
-                "(force_audio video_url)"
+                "(force_audio video_url)" if injected_video else
+                "    [Gate] ASR streams the live-audio variant "
+                "chosen by the probe"
             )
         downloader.schedule(self._client, course_id, sub_id,
-                            url=injected_video)
+                            url=chosen_video)
         try:
             handle = downloader.get(sub_id, timeout=120)
         except TimeoutError as e:
@@ -542,7 +658,7 @@ class LectureRunner:
         # the video variant we picked — 泛函分析 664140 carried two
         # 1920x1080 variants, only the first one silent.  Re-download and
         # re-ASR each remaining distinct variant before giving up.
-        if not transcript.strip() and not injected_video:
+        if not transcript.strip() and not chosen_video:
             transcript, segments = self._retry_alternate_videos(
                 sub_id, course_id, handle, transcript, segments)
 

@@ -908,6 +908,78 @@ class Transcriber:
         return None
 
 
+def probe_audio(url: str, headers: str = "",
+                positions: tuple[int, ...] = (0, 900),
+                window_s: int = 120) -> dict:
+    """Stream one short slice of a video URL through ffmpeg and report
+    whether the audio carries live dynamics — the readiness probe that
+    distinguishes a real recording from a pre-release placeholder (dead /
+    flat-noise track) WITHOUT downloading the lecture or loading ASR.
+
+    Tries each ``positions`` seek point in order (head first: plain
+    streaming works through proxies that ignore range requests), stops at
+    the first window showing speech-like content.  A window is "live" when
+    speech-frac >= 3 % or max/median >= 2.5 (syllable dynamics); flat
+    noise floors sit near 1.0 with ~0 %.  Seeked windows shorter than 30 s
+    decoded (proxy rejected the seek) fall through to the next position.
+
+    Returns {"ok": bool, "seconds": float, "max": float, "median": float,
+    "speech_frac": float, "position": int, "error": str|None}.
+    """
+    best: dict = {"ok": False, "seconds": 0.0, "max": 0.0,
+                  "median": 0.0, "speech_frac": 0.0, "position": -1,
+                  "error": "no window decoded"}
+    for pos in positions:
+        cmd = ["ffmpeg", "-v", "error"]
+        if headers:
+            cmd += ["-headers", headers]
+        if url.startswith(("http://", "https://")):
+            cmd += ["-reconnect", "1", "-reconnect_streamed", "1",
+                    "-reconnect_delay_max", "10",
+                    "-reconnect_on_network_error", "1",
+                    "-reconnect_on_http_error", "4xx,5xx"]
+        cmd += ["-ss", str(pos), "-i", url,
+                "-t", str(window_s),
+                "-vn", "-ar", str(SAMPLE_RATE), "-ac", "1",
+                "-f", "f32le", "-"]
+        try:
+            proc = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=420,
+            )
+        except subprocess.TimeoutExpired:
+            best = {**best, "error": f"ffmpeg timeout at {pos}s",
+                    "position": pos}
+            continue
+        raw = proc.stdout
+        n = len(raw) // BYTES_PER_SAMPLE
+        seconds = n / SAMPLE_RATE
+        if n < SAMPLE_RATE * 30:
+            best = {**best, "error": (
+                f"only {seconds:.0f}s decoded at {pos}s "
+                f"(seek unsupported / stream cut)"), "position": pos}
+            continue
+        samples = np.frombuffer(raw[:n * BYTES_PER_SAMPLE],
+                                dtype=np.float32)
+        win = SAMPLE_RATE
+        nf = n // win
+        env = np.sqrt(
+            (samples[: nf * win].reshape(nf, win) ** 2).mean(axis=1)
+        )
+        mx, med = float(env.max()), float(np.median(env))
+        floor = float(np.percentile(env, 20))
+        speech_frac = float(np.mean(env > max(3 * floor, 1e-4)))
+        verdict = {
+            "ok": speech_frac >= 0.03 or (med > 1e-4 and mx / med >= 2.5),
+            "seconds": seconds, "max": mx, "median": med,
+            "speech_frac": speech_frac, "position": pos, "error": None,
+        }
+        best = verdict
+        if verdict["ok"]:
+            return verdict
+    return best
+
+
 class IncompleteAudioError(RuntimeError):
     """Raised when downloaded audio is significantly shorter than expected.
 

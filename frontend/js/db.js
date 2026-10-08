@@ -142,6 +142,10 @@ function _deriveState(row) {
   // appears later).  Render it as a gray informational badge, not a red
   // failure.
   if (row.error_stage === "no_video") return "novideo";
+  // "waiting_*" stages (e.g. waiting_audio) are platform-side incompleteness
+  // the backend re-probes daily without burning the error budget — amber
+  // Waiting, not a red failure.
+  if (row.error_stage && row.error_stage.indexOf("waiting") === 0) return "waiting";
   if (row.error_stage) return "failed";
   if (row.summary && row.processed_at) return "ready";
   // Processed, no summary, no error = a lecture the backend permanently

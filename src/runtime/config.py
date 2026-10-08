@@ -288,3 +288,13 @@ BOARD_FALLBACK = os.environ.get("BOARD_FALLBACK", "1").strip().lower() not in ("
 BOARD_FRAME_INTERVAL = int(os.environ.get("BOARD_FRAME_INTERVAL", "20"))
 # 单节最多送去 OCR 的板书帧数（去重后按时间等比截断）。
 BOARD_MAX_PAGES = int(os.environ.get("BOARD_MAX_PAGES", "260"))
+
+# ── 音轨验货闸（readiness gate）──────────────────────────────────────────
+# 处理新课前，先对每个视频候选（含 /play/1/ 播放口路径）抽两段短窗实测音频
+# 动态（probe_audio，纯 ffmpeg 流读，每候选 ~2MB、不加载 ASR）。全部平直
+# = 平台混流未到位（泛函 9.21/9.28：审核解除后 WebVPN 出口音轨依然死），
+# 整节挂 waiting 软状态每天重探——不吃 3 次 error 配额、不进流程、不出
+# 半吊子摘要；一旦探到活音轨自动用该候选走正流程。超过 GATE_MAX_DAYS 仍
+# 全哑 → 放行（板书兜底从真实画面抢救内容）。置 0 关闭。
+AUDIO_GATE = os.environ.get("AUDIO_GATE", "1").strip().lower() not in ("0", "false", "no", "")
+AUDIO_GATE_MAX_DAYS = int(os.environ.get("AUDIO_GATE_MAX_DAYS", "7"))
