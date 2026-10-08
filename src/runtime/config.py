@@ -37,16 +37,6 @@ USER_AGENT = (
 # 现的那条；这避免 Summarizer 内部按 name 索引 client 字典时被后写覆盖。
 MODEL_PROVIDERS: list[dict] = [
     {
-        "name": "deepseek",
-        "api_key_env": "DEEPSEEK_API_KEY",
-        "base_url_env": "DEEPSEEK_BASE_URL",
-        "default_base_url": "https://api.deepseek.com/v1",
-        "models": [
-            "deepseek-flash",
-            "deepseek-v4-pro",
-        ],
-    },
-    {
         "name": "modelscope",
         "api_key_env": "DASHSCOPE_API_KEY",
         "base_url_env": "DASHSCOPE_BASE_URL",
@@ -58,8 +48,17 @@ MODEL_PROVIDERS: list[dict] = [
             # 注意：ModelScope 上"有模型页但无推理 provider"的模型会恒 400
             # （如 DeepSeek-V4-Flash、MiniMax-M3、Tencent-Hunyuan/Hy3 实测空响应），
             # 加模型前必须先冒烟验证。2026-09-14。
-            # 2026-10-08：账户 429 insufficient_balance（三模型同拒），充值/换
-            # key 前它只会白白烧掉每次摘要头几发重试；故整体降到 deepseek 之后。
+        ],
+    },
+    {
+        # 首选 modelscope 余额耗尽时（429 insufficient_balance）自动降级到这里。
+        "name": "deepseek",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "base_url_env": "DEEPSEEK_BASE_URL",
+        "default_base_url": "https://api.deepseek.com/v1",
+        "models": [
+            "deepseek-flash",
+            "deepseek-v4-pro",
         ],
     },
     # {
