@@ -735,9 +735,10 @@ class ICourseClient:
         total = 0
         ident_logged = False
         for _attempt in range(max_attempts):
+            prev_have = (os.path.getsize(output_path)
+                         if os.path.exists(output_path) else 0)
             try:
-                have = (os.path.getsize(output_path)
-                        if os.path.exists(output_path) else 0)
+                have = prev_have
                 if total and have >= total:
                     return output_path, True
                 getter = (self.vpn.get_raw
@@ -787,6 +788,13 @@ class ICourseClient:
             except Exception as e:
                 print(f"    resume attempt died: "
                       f"{type(e).__name__}: {str(e)[:120]}", flush=True)
+                now = (os.path.getsize(output_path)
+                       if os.path.exists(output_path) else 0)
+                if now - prev_have < (1 << 20):
+                    # Zero-progress attempt (refused/throttled) — cool
+                    # down before re-hitting the endpoint; hammering it
+                    # is how a 41 % cut turns into a 403 window.
+                    time.sleep(20)
         have = (os.path.getsize(output_path)
                 if os.path.exists(output_path) else 0)
         return output_path, bool(total) and have >= total

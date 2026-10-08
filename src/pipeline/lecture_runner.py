@@ -667,6 +667,27 @@ class LectureRunner:
             self._db.update_error(sub_id, "transcribe", str(e))
             self._release_audio(sub_id)
             return None, None
+        except RuntimeError as e:
+            # Transport refusals (CDN 403/429 rate-limit windows, e.g. the
+            # cooldown after a day of burst force-runs) used to propagate
+            # out of run() and strand the lecture with the board fallback
+            # never attempted (v2 digest: [Board] hits 0).  Route them
+            # exactly like incomplete audio: retriable error + None lets
+            # the caller's board fallback decide this very run.
+            msg = str(e)
+            if ("403" in msg or "429" in msg or "HTTP error" in msg
+                    or "rc=8" in msg):
+                self._reporter.info(
+                    f"    [SKIP] audio pull refused "
+                    f"(transport window): {msg[-140:]}"
+                )
+                self._db.update_error(
+                    sub_id, "transcribe",
+                    "audio stream refused (403/429 window)",
+                )
+                self._release_audio(sub_id)
+                return None, None
+            raise
         except Exception as e:
             self._reporter.info(
                 f"    [FAIL] Transcription error: {type(e).__name__}: {e}"
