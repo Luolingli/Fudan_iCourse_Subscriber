@@ -426,6 +426,19 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_lecture_digests(self, course_id: str) -> list[dict]:
+        """Whole-course lecture listing (sub_id/date/title/processed/error)
+        for the course-wide diag sweep — no filtering, no writes."""
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT sub_id, date, sub_title, processed_at,
+                          error_stage
+                   FROM lectures WHERE course_id = ?
+                   ORDER BY date, sub_id""",
+                (str(course_id),),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def get_board_page_states(self, sub_id: str,
                               min_page_num: int) -> list[tuple[int, str]]:
         """(page_num, ocr_status) for every synthetic board row (page_num

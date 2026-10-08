@@ -279,39 +279,59 @@ def _crawl_semester_catalog(client: ICourseClient, db: Database,
 
 
 def _run_source_diag(client, db, reporter) -> None:
-    """Read-only forensics for DIAG_SOURCE_IDS lectures: for each one print
-    (a) the requests-stack view of every video URL variant (status /
-    declared total / etag via a 2-byte Range probe), (b) the media-stack
-    view of the primary variant (ffprobe duration/size over the same
-    WebVPN path), and (c) whether the platform's own transcript
-    (search-trans-result) is available — the #44 genetics escape hatch.
-    Cross-reading (a) vs (b) answers object-vs-path serving; (c) answers
-    whether audio is needed at all."""
+    """Read-only forensics sweep for DIAG_SOURCE_IDS entries. A plain
+    sub_id probes that one lecture; a ``c:<course_id>`` entry sweeps the
+    WHOLE course — one line per lecture with (a) official-transcript
+    density (chars/s — the platform's own ASR view), (b) the first video
+    variant's head-window envelope (max/median/speech_frac) and syllable
+    AM spread. Reading down the course sorts the noise floor from the
+    speech without any lecture selection bias: electrical hum shows
+    am_spread≈0.05, buried-but-present speech still shows ≥0.3."""
     import json
-    from src.ai.transcriber import stream_format_meta
-    for sid in config.DIAG_SOURCE_IDS:
-        row = db.get_lecture(str(sid)) or {}
-        cid = str(row.get("course_id") or "")
-        date = str(row.get("date") or "")
+    from src.ai.transcriber import probe_audio
+    targets: list[tuple[str, str, str]] = []
+    for entry in config.DIAG_SOURCE_IDS:
+        if str(entry).startswith("c:"):
+            cid = str(entry)[2:].strip()
+            for row in db.list_lecture_digests(cid):
+                targets.append((cid, str(row["sub_id"]),
+                                str(row.get("date") or "")))
+        else:
+            row = db.get_lecture(str(entry)) or {}
+            targets.append((str(row.get("course_id") or ""),
+                            str(entry), str(row.get("date") or "")))
+    seen = set()
+    for cid, sid, date in targets:
+        if sid in seen:
+            continue
+        seen.add(sid)
+        row = db.get_lecture(sid) or {}
         reporter.info(
             f"=== DIAG {sid} course={cid} date={date} "
-            f"processed={bool(row.get('processed_at'))} ==="
+            f"processed={bool(row.get('processed_at'))} "
+            f"err={row.get('error_stage')} ==="
         )
-        for r in client.probe_video_sources(cid, sid, date=date):
-            print("  [req ] " + json.dumps(r, ensure_ascii=False), flush=True)
+        tr = client.probe_official_transcript(sid)
+        dens = (tr["chars"] / tr["last_end_s"]
+                if tr.get("found") and tr.get("last_end_s") else 0)
+        print(f"  [trans ] density={dens:.2f} chars/s "
+              + json.dumps(tr, ensure_ascii=False)[:150], flush=True)
         try:
-            urls = client.get_video_url_candidates(cid, sid, date=date)
-            if urls:
-                vpn_url, headers = client.get_stream_params(urls[0])
-                meta = stream_format_meta(vpn_url, headers)
-                print("  [media] " + json.dumps(meta, ensure_ascii=False),
-                      flush=True)
+            urls = client.get_video_url_candidates(cid, sid, date=date or None)
+            if not urls:
+                print("  [env   ] no video url", flush=True)
+                continue
+            vpn_url, headers = client.get_stream_params(urls[0])
+            res = probe_audio(vpn_url, headers, positions=(0,),
+                              window_s=90)
+            print(f"  [env   ] max={res['max']:.5f} "
+                  f"median={res['median']:.5f} "
+                  f"speech_frac={res['speech_frac']:.0%} "
+                  f"am_spread={res.get('am_spread', -1):.2f} "
+                  f"ok={res['ok']} err={res['error']}", flush=True)
         except Exception as e:
-            print(f"  [media] probe failed: {type(e).__name__}: {e}",
-                  flush=True)
-        print("  [trans ] " + json.dumps(
-            client.probe_official_transcript(sid), ensure_ascii=False),
-            flush=True)
+            print(f"  [env   ] probe failed: "
+                  f"{type(e).__name__}: {str(e)[:90]}", flush=True)
 
 
 def _run_asr_probes(transcriber, reporter) -> None:

@@ -969,10 +969,16 @@ def probe_audio(url: str, headers: str = "",
         mx, med = float(env.max()), float(np.median(env))
         floor = float(np.percentile(env, 20))
         speech_frac = float(np.mean(env > max(3 * floor, 1e-4)))
+        # am_spread: inter-quartile envelope spread / median — syllable
+        # modulation lives around >=0.35 for speech, ~0.05 for steady
+        # electrical hum, however loud.
+        iqr = (float(np.percentile(env, 75))
+               - float(np.percentile(env, 25)))
         verdict = {
             "ok": speech_frac >= 0.03 or (med > 1e-4 and mx / med >= 2.5),
             "seconds": seconds, "max": mx, "median": med,
             "speech_frac": speech_frac, "position": pos, "error": None,
+            "am_spread": iqr / max(med, 1e-6),
         }
         best = verdict
         if verdict["ok"]:
