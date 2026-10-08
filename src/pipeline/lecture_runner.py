@@ -540,7 +540,8 @@ class LectureRunner:
     @staticmethod
     def _official_transcript_usable(segments: list[dict] | None,
                                     max_gap_minutes: int = 20,
-                                    duration_hint_s: int = 0) -> bool:
+                                    duration_hint_s: int = 0,
+                                    min_chars_per_sec: float = 0.5) -> bool:
         """True if the official transcript is complete enough to use.
 
         Looks for a >``max_gap_minutes`` hole in three places: before the
@@ -550,11 +551,27 @@ class LectureRunner:
         truncation).  Also requires at least one non-empty segment — a
         timing-complete transcript whose ASR text is all empty must fall
         back to local ASR instead of being persisted as an empty
-        transcript (which would short-circuit the retry)."""
+        transcript (which would short-circuit the retry).
+
+        A DENSITY floor is the third guard: the platform runs its own ASR
+        on the SAME uploaded file, so a recording whose audio track is a
+        silent floor yields a timing-complete transcript of nothing but
+        fillers — the 669978/664140 diagnostics returned 71/592 segments
+        spanning the full lecture that all read "嗯。" (222 / 1776 chars
+        over ~2.7h ≈ 0.02 / 0.19 chars-per-sec). A real lecture is far
+        denser, so anything below ``min_chars_per_sec`` is filler-junk and
+        must fall through to the board fallback rather than be summarized.
+        """
         if not segments:
             return False
         if not any((s.get("text") or "").strip() for s in segments):
             return False
+        span_s = max(int(segments[-1].get("end_ms", 0)) // 1000,
+                     int(duration_hint_s or 0))
+        if span_s > 0:
+            chars = sum(len((s.get("text") or "").strip()) for s in segments)
+            if chars / span_s < min_chars_per_sec:
+                return False
         max_gap_ms = max_gap_minutes * 60_000
         if segments[0]["start_ms"] > max_gap_ms:
             return False
