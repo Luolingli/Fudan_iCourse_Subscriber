@@ -9,14 +9,15 @@ yields only a 1-frame "operation guide" placeholder.  The blackboard is
 still fully recoverable from the video frames — this module automates the
 manual 664140 recovery of 2026-09-29.
 
-Flow: download mp4 → ``ffmpeg -vf fps=1/INTERVAL`` frame sampling → dHash
-per frame → garbage catalog + pairwise dedup (capped at
-``BOARD_MAX_PAGES``) → OCR survivors through the scheduler's OCR pool →
-persist as synthetic ``ppt_pages`` rows with ``page_num >= 10000`` (the
-platform feed enumerates page_num from 1, so the two spaces never
-collide) and ``pptimgurl = 'videoframe:<sec>'``.  ``get_done_ppt_pages``
-surfaces them exactly like platform slides, so the PPT-only summarization
-path is unchanged.
+Flow: stream the lecture video through ``ffmpeg`` (same reconnect ladder as
+AudioDownloader; ``-vf fps=1/INTERVAL`` frame sampling) → dHash per frame →
+garbage catalog + pairwise dedup (capped at ``BOARD_MAX_PAGES``) → OCR
+survivors through the scheduler's OCR pool → persist as synthetic
+``ppt_pages`` rows with ``page_num >= 10000`` (the platform feed enumerates
+page_num from 1, so the two spaces never collide) and
+``pptimgurl = 'videoframe:<sec>'``.  ``get_done_ppt_pages`` surfaces them
+exactly like platform slides, so the PPT-only summarization path is
+unchanged.
 
 Idempotent across runs: pages already done/invalid are not re-OCR'd, and
 a lecture whose board pages are all processed short-circuits without
@@ -64,16 +65,28 @@ def _board_rows(db: "Database", sub_id: str) -> tuple[int, int, int]:
     return done, pending, len(states)
 
 
-def _sample_frames_ffmpeg(video_path: str, frame_dir: str, interval: int,
-                          reporter: "Reporter | None") -> list[str]:
+def _sample_frames_ffmpeg(video_source: str, frame_dir: str, interval: int,
+                          reporter: "Reporter | None",
+                          headers: str = "") -> list[str]:
+    """Stream (or read) into ffmpeg and emit 1 jpg per ``interval`` s.
+
+    HTTP(S) sources get the same reconnect ladder as AudioDownloader —
+    the WebVPN path is intermittently cut mid-stream at ~40 % of a full
+    lecture, and a plain requests download of the whole mp4 dies there.
+    Sampling straight through ffmpeg survives the cuts and simply yields
+    fewer frames on a bad network (graceful degradation).
+    """
     pattern = os.path.join(frame_dir, "f_%05d.jpg")
-    cmd = [
-        "ffmpeg", "-y", "-v", "error",
-        "-i", video_path,
-        "-vf", f"fps=1/{interval}",
-        "-q:v", "2",
-        pattern,
-    ]
+    cmd = ["ffmpeg", "-y", "-v", "error"]
+    if headers:
+        cmd += ["-headers", headers]
+    if video_source.startswith(("http://", "https://")):
+        cmd += ["-reconnect", "1", "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "10",
+                "-reconnect_on_network_error", "1",
+                "-reconnect_on_http_error", "4xx,5xx"]
+    cmd += ["-i", video_source, "-an",
+            "-vf", f"fps=1/{interval}", "-q:v", "2", pattern]
     if reporter:
         reporter.info(
             f"    [Board] ffmpeg sampling 1 frame / {interval}s ..."
@@ -93,8 +106,9 @@ def _sample_frames_ffmpeg(video_path: str, frame_dir: str, interval: int,
     )
 
 
-def _sample_frames_pyav(video_path: str, frame_dir: str, interval: int,
-                        reporter: "Reporter | None") -> list[str]:
+def _sample_frames_pyav(video_source: str, frame_dir: str, interval: int,
+                        reporter: "Reporter | None",
+                        headers: str = "") -> list[str]:
     """Fallback sampler via PyAV for environments without the ffmpeg
     binary (local dev).  Emits one jpg per >=interval seconds of media
     time, same numbering convention as the ffmpeg path."""
@@ -104,10 +118,17 @@ def _sample_frames_pyav(video_path: str, frame_dir: str, interval: int,
             f"    [Board] PyAV sampling 1 frame / {interval}s ..."
         )
     os.makedirs(frame_dir, exist_ok=True)
+    kwargs = {}
+    if headers and video_source.startswith(("http://", "https://")):
+        kwargs["headers"] = {
+            kv.split("=", 1)[0].strip(): kv.split("=", 1)[1].strip()
+            for kv in headers.replace("\r\n", "\n").split("\n")
+            if "=" in kv
+        }
     out: list[str] = []
     next_sec = 0.0
     idx = 1
-    with av.open(video_path) as container:
+    with av.open(video_source, **kwargs) as container:
         for frame in container.decode(video=0):
             t = frame.time if frame.time is not None else idx * 0.04
             if t < next_sec:
@@ -121,13 +142,15 @@ def _sample_frames_pyav(video_path: str, frame_dir: str, interval: int,
     return out
 
 
-def _sample_frames(video_path: str, frame_dir: str, interval: int,
-                   reporter: "Reporter | None") -> list[str]:
+def _sample_frames(video_source: str, frame_dir: str, interval: int,
+                   reporter: "Reporter | None",
+                   headers: str = "") -> list[str]:
     os.makedirs(frame_dir, exist_ok=True)
     if shutil.which("ffmpeg"):
-        return _sample_frames_ffmpeg(video_path, frame_dir, interval,
-                                     reporter)
-    return _sample_frames_pyav(video_path, frame_dir, interval, reporter)
+        return _sample_frames_ffmpeg(video_source, frame_dir, interval,
+                                     reporter, headers)
+    return _sample_frames_pyav(video_source, frame_dir, interval,
+                               reporter, headers)
 
 
 def extract_board_pages(
@@ -140,11 +163,12 @@ def extract_board_pages(
     video_url: str,
     workdir: str,
 ) -> int:
-    """Download the lecture video and OCR its blackboard frames.
+    """Sample the lecture video (streamed through ffmpeg with reconnect)
+    and OCR its blackboard frames.
 
     Returns the number of board pages (page_num >= ``BOARD_PAGE_NUM_BASE``)
     in a terminal state afterwards (done + invalid).  0 means nothing was
-    recovered; any hard failure (download, ffmpeg) propagates — the caller
+    recovered; any hard failure (ffmpeg, stream) propagates — the caller
     treats the whole attempt as degraded.
     """
     sub_id = str(sub_id)
@@ -157,15 +181,12 @@ def extract_board_pages(
             )
         return done
 
-    mp4 = os.path.join(workdir, f"{sub_id}_board.mp4")
     frame_dir = os.path.join(workdir, f"{sub_id}_frames")
     interval = max(5, int(config.BOARD_FRAME_INTERVAL))
     try:
-        if reporter:
-            reporter.info("    [Board] downloading lecture video ...")
-        client.download_video(video_url, mp4)
-
-        frames = _sample_frames(mp4, frame_dir, interval, reporter)
+        vpn_url, headers = client.get_stream_params(video_url)
+        frames = _sample_frames(vpn_url, frame_dir, interval, reporter,
+                                headers)
         if not frames:
             return 0
         if reporter:
@@ -251,8 +272,3 @@ def extract_board_pages(
         return done
     finally:
         shutil.rmtree(frame_dir, ignore_errors=True)
-        if os.path.exists(mp4):
-            try:
-                os.remove(mp4)
-            except OSError:
-                pass

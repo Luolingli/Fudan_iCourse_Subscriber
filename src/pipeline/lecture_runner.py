@@ -156,6 +156,42 @@ class LectureRunner:
             # the pages 'pending' forever and force the retry run to redo
             # download + dedup from scratch.
             ppt_handle.drain()
+            # Audio unusable THIS run (truncated stream, dead track) does
+            # not mean the video is: for board-writing lectures the whole
+            # lecture lives in the frames, and the platform screenshot feed
+            # is permanently placeholder junk (泛函分析 9.21/9.28).  Try the
+            # board fallback before giving up; if it yields substantial
+            # text, finalize a board-only summary (same contract as an
+            # empty transcript with good PPT).
+            if config.BOARD_FALLBACK:
+                ppt_text = "\n".join(
+                    p.get("text", "") for p in self._kept_pages(sub_id)
+                ).strip()
+                if len(ppt_text) < 300:
+                    recovered = self._board_from_video(course_id, sub_id)
+                    if recovered:
+                        self._pages_cache.pop(sub_id, None)
+                        ppt_text = "\n".join(
+                            p.get("text", "")
+                            for p in self._kept_pages(sub_id)
+                        ).strip()
+                if len(ppt_text) >= 300:
+                    self._reporter.info(
+                        "    No usable audio — summarizing from "
+                        "video-frame board text only."
+                    )
+                    summary = self._summarize(
+                        sub_id, course_title, "", [],
+                    )
+                    if summary:
+                        self._db.mark_processed(sub_id)
+                        self._db.clear_error(sub_id)
+                        self._release_audio(sub_id)
+                        elapsed = time.time() - t_start
+                        self._reporter.lecture_done(
+                            course_title, sub_title, elapsed,
+                        )
+                        return summary
             return None
 
         # ── Phase E — drain remaining OCR work ─────────────────────────
@@ -264,10 +300,11 @@ class LectureRunner:
     def _board_from_video(self, course_id: str, sub_id: str) -> int:
         """Last-resort content recovery for board-writing lectures whose
         platform screenshot feed is empty/placeholder (泛函分析 9.21/9.28):
-        download the lecture video and OCR its blackboard frames into
-        synthetic ``ppt_pages`` rows.  Returns the number of terminal board
-        rows afterwards (0 → nothing recovered; failures are logged, never
-        raised — the caller degrades to the retriable-error path)."""
+        stream the lecture video through ffmpeg and OCR its blackboard
+        frames into synthetic ``ppt_pages`` rows.  Returns the number of
+        terminal board rows afterwards (0 → nothing recovered; failures
+        are logged, never raised — the caller degrades to the retriable-
+        error path)."""
         try:
             video_url = self._client.get_video_url(course_id, sub_id)
         except Exception as e:
