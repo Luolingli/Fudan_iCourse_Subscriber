@@ -205,9 +205,15 @@ VIDEO_DOWNLOAD_CONCURRENCY = int(
     os.environ.get("VIDEO_DOWNLOAD_CONCURRENCY", "2")
 )
 
-# 是否优先使用 iCourse 官方字幕（跳过 ASR 转录）。默认关闭。
+# 是否优先使用 iCourse 官方字幕（跳过本地 ASR）。默认开启。
+# 2026-10-08 对照诊断：正常课程的官方转录密度 2.7–3.5 字/s（真内容，
+# 且当天即就绪），而哑音轨课（泛函 9.21/9.28、#44 遗传学）平台自己的 ASR
+# 也只解析出 0.02–0.19 字/s 的全“嗯”。_official_transcript_usable 的密度闸
+# （min 0.5 字/s + gap 检查）正是据此把两类精准分开：健康转录直接用
+# （免去脆弱的 2.7GB WebVPN 下载与 41% 截断），烂转录自动回退到本地
+# ASR/板书兜底。故可安全默认开启。置 USE_OFFICIAL_TRANSCRIPT=0 可关。
 USE_OFFICIAL_TRANSCRIPT = (
-    os.environ.get("USE_OFFICIAL_TRANSCRIPT", "").strip().lower()
+    os.environ.get("USE_OFFICIAL_TRANSCRIPT", "1").strip().lower()
     in ("1", "true", "yes")
 )
 
