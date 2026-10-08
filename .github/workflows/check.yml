@@ -17,6 +17,11 @@ on:
         required: false
         default: ""
         type: string
+      diag_source_ids:
+        description: "Read-only forensics only (sub_ids): per-URL object identity (requests vs media stack) + official transcript availability"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -181,6 +186,7 @@ jobs:
           CRAWL_TERM: ${{ secrets.CRAWL_TERM }}
           FORCE_CRAWL: ${{ github.event.inputs.force_crawl == 'true' }}
           FORCE_SUB_IDS: ${{ github.event.inputs.force_sub_ids }}
+          DIAG_SOURCE_IDS: ${{ github.event.inputs.diag_source_ids }}
           SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}

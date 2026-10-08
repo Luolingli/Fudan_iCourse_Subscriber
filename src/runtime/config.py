@@ -309,3 +309,15 @@ BOARD_MAX_PAGES = int(os.environ.get("BOARD_MAX_PAGES", "320"))
 LECTURE_MIN_AGE_DAYS = int(os.environ.get("LECTURE_MIN_AGE_DAYS", "2"))
 AUDIO_GATE = os.environ.get("AUDIO_GATE", "1").strip().lower() not in ("0", "false", "no", "")
 AUDIO_GATE_MAX_DAYS = int(os.environ.get("AUDIO_GATE_MAX_DAYS", "3"))
+
+# ── 取证模式（source forensics, read-only）──────────────────────────────
+# DIAG_SOURCE_IDS=669978 → 本次 run 不处理任何讲义,只打印每个视频 URL 的
+# 双栈身份对账(requests 栈 Range 探测 status/total/etag + 媒体栈 ffprobe
+# duration/size)和平台官方转录可用性(search-trans-result,#44 遗传学就是
+# 靠它绕过的)。全部只读,不写 DB,几分钟出表,用于裁决"哑件/截断是对象维度
+# 还是路径维度"以及"官方字幕能不能直接救命"。
+DIAG_SOURCE_IDS = [
+    s.strip()
+    for s in os.environ.get("DIAG_SOURCE_IDS", "").split(",")
+    if s.strip()
+]

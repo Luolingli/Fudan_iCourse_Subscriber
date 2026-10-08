@@ -278,6 +278,42 @@ def _crawl_semester_catalog(client: ICourseClient, db: Database,
     reporter.info("Semester catalog crawl complete.")
 
 
+def _run_source_diag(client, db, reporter) -> None:
+    """Read-only forensics for DIAG_SOURCE_IDS lectures: for each one print
+    (a) the requests-stack view of every video URL variant (status /
+    declared total / etag via a 2-byte Range probe), (b) the media-stack
+    view of the primary variant (ffprobe duration/size over the same
+    WebVPN path), and (c) whether the platform's own transcript
+    (search-trans-result) is available — the #44 genetics escape hatch.
+    Cross-reading (a) vs (b) answers object-vs-path serving; (c) answers
+    whether audio is needed at all."""
+    import json
+    from src.ai.transcriber import stream_format_meta
+    for sid in config.DIAG_SOURCE_IDS:
+        row = db.get_lecture(str(sid)) or {}
+        cid = str(row.get("course_id") or "")
+        date = str(row.get("date") or "")
+        reporter.info(
+            f"=== DIAG {sid} course={cid} date={date} "
+            f"processed={bool(row.get('processed_at'))} ==="
+        )
+        for r in client.probe_video_sources(cid, sid, date=date):
+            print("  [req ] " + json.dumps(r, ensure_ascii=False), flush=True)
+        try:
+            urls = client.get_video_url_candidates(cid, sid, date=date)
+            if urls:
+                vpn_url, headers = client.get_stream_params(urls[0])
+                meta = stream_format_meta(vpn_url, headers)
+                print("  [media] " + json.dumps(meta, ensure_ascii=False),
+                      flush=True)
+        except Exception as e:
+            print(f"  [media] probe failed: {type(e).__name__}: {e}",
+                  flush=True)
+        print("  [trans ] " + json.dumps(
+            client.probe_official_transcript(sid), ensure_ascii=False),
+            flush=True)
+
+
 def _run_asr_probes(transcriber, reporter) -> None:
     """One-off forensics for force_audio entries flagged asr_test: chunk-
     decode their audio asset (16 kHz mono f32le raw) with the recognizer
@@ -409,6 +445,14 @@ def run():
 
     vpn = login_with_retry()
     client = ICourseClient(vpn)
+
+    if config.DIAG_SOURCE_IDS:
+        # Read-only forensics mode: object identity per video URL across
+        # both stacks + official-transcript availability, then stop — no
+        # lecture processing this run (DB untouched → commit skipped).
+        _run_source_diag(client, db, reporter)
+        return
+
     email_items: list = []
 
     # Refresh the semester catalog: run on the 5th and 25th of each month,

@@ -374,6 +374,68 @@ class ICourseClient:
             return ""
         return " ".join(s["text"] for s in segments if s["text"])
 
+    def probe_video_sources(self, course_id: str, sub_id: str,
+                            date: str | None = None) -> list[dict]:
+        """HTTP identity probe for every video URL variant of one lecture.
+
+        Asks each candidate (signed, same URL the pipeline would use) with
+        ``Range: bytes=0-1`` and reports status / declared total size / etag
+        WITHOUT pulling bulk data. The size+etag tuple identifies WHICH
+        physical object a URL currently maps to on this egress — comparing
+        the variants (and the ffprobe view from the media stack) settles
+        whether the silent-proxy / 41%-cut behavior is per-object or
+        per-path. Never raises: every failure becomes a row.
+        """
+        out: list[dict] = []
+        try:
+            urls = self.get_video_url_candidates(course_id, sub_id,
+                                                 date=date)
+        except Exception as e:
+            return [{"url": None, "error": f"candidates: {e}"}]
+        for u in urls[:6]:
+            row: dict = {"url": urlparse(u).path.rsplit("/", 1)[-1],
+                         "status": None, "total": None, "etag": None}
+            try:
+                getter = (self.vpn.get_raw
+                          if u.startswith(config.WEBVPN_BASE)
+                          else self.vpn.get)
+                r = getter(u, stream=True, timeout=25,
+                           headers={"Range": "bytes=0-1"})
+                try:
+                    row["status"] = r.status_code
+                    row["etag"] = r.headers.get("etag")
+                    cr = r.headers.get("content-range")
+                    if cr and "/" in cr:
+                        row["total"] = int(cr.rsplit("/", 1)[-1])
+                    elif r.headers.get("content-length"):
+                        row["total"] = int(r.headers["content-length"])
+                    row["accept_ranges"] = r.headers.get("accept-ranges")
+                finally:
+                    r.close()
+            except Exception as e:
+                row["error"] = f"{type(e).__name__}: {str(e)[:100]}"
+            out.append(row)
+        return out
+
+    def probe_official_transcript(self, sub_id: str) -> dict:
+        """What does the platform's own transcript (search-trans-result)
+        hold for this lecture?  Genetics recovered silent-audio lectures via
+        official transcripts (#44) — same may exist for ours. Returns
+        {found, segments, chars, first_end_s, last_end_s, sample}."""
+        info: dict = {"found": False, "segments": 0, "chars": 0}
+        try:
+            segs = self.get_transcript_segments(sub_id)
+        except Exception as e:
+            info["error"] = f"{type(e).__name__}: {str(e)[:100]}"
+            return info
+        if not segs:
+            return info
+        text = " ".join(s.get("text", "") for s in segs)
+        info.update(found=True, segments=len(segs), chars=len(text),
+                    last_end_s=int(segs[-1].get("end_ms", 0)) // 1000,
+                    sample=text[:80])
+        return info
+
     def get_transcript_segments(self, sub_id: str) -> list[dict] | None:
         """Get transcript as timed segments.  Returns None on API error,
         empty list if no transcript exists.

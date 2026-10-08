@@ -980,6 +980,33 @@ def probe_audio(url: str, headers: str = "",
     return best
 
 
+def stream_format_meta(url: str, headers: str = "") -> dict:
+    """ffprobe a (streaming) URL and return the MEDIA-stack view of the
+    object: duration + server-declared total size.  Pairing this with the
+    requests-stack view (ICourseClient.probe_video_sources) in the same run
+    shows whether ffmpeg-over-WebVPN and requests-over-WebVPN are being
+    served the SAME physical file (equal size) or different objects
+    (silent proxy vs real recording) — the identity question, one line.
+    """
+    import json
+    cmd = ["ffprobe", "-v", "error"]
+    if headers:
+        cmd += ["-headers", headers]
+    cmd += ["-show_format", "-of", "json", url]
+    try:
+        p = subprocess.run(cmd, stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, timeout=90)
+        fmt = (json.loads(p.stdout.decode() or "{}") or {}).get("format") or {}
+        dur = float(fmt.get("duration") or 0)
+        size = int(fmt.get("size") or 0)
+        return {"duration": dur or None, "size": size or None,
+                "error": None if p.returncode == 0
+                else f"rc={p.returncode}"}
+    except Exception as e:
+        return {"duration": None, "size": None,
+                "error": f"{type(e).__name__}: {str(e)[:80]}"}
+
+
 class IncompleteAudioError(RuntimeError):
     """Raised when downloaded audio is significantly shorter than expected.
 

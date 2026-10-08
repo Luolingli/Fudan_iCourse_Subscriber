@@ -56,6 +56,7 @@ from src.ai.transcriber import (
     IncompleteAudioError,
     NoAudioStreamError,
     probe_audio,
+    stream_format_meta,
 )
 from src.runtime import config
 
@@ -227,7 +228,7 @@ class LectureRunner:
                     p.get("text", "") for p in self._kept_pages(sub_id)
                 ).strip()
                 if len(ppt_text) < 300:
-                    recovered = self._board_from_video(course_id, sub_id)
+                    recovered = self._board_from_video(course_id, sub_id, date)
                     if recovered:
                         self._pages_cache.pop(sub_id, None)
                         ppt_text = "\n".join(
@@ -289,7 +290,7 @@ class LectureRunner:
                 p.get("text", "") for p in self._kept_pages(sub_id)
             ).strip()
             if len(ppt_text) < 300 and config.BOARD_FALLBACK:
-                recovered = self._board_from_video(course_id, sub_id)
+                recovered = self._board_from_video(course_id, sub_id, date)
                 if recovered:
                     self._pages_cache.pop(sub_id, None)
                     ppt_text = "\n".join(
@@ -356,43 +357,59 @@ class LectureRunner:
         self._pages_cache[sub_id] = pages
         return pages
 
-    def _board_from_video(self, course_id: str, sub_id: str) -> int:
+    def _board_from_video(self, course_id: str, sub_id: str,
+                          date: str = "") -> int:
         """Last-resort content recovery for board-writing lectures whose
         platform screenshot feed is empty/placeholder (泛函分析 9.21/9.28):
         stream the lecture video through ffmpeg and OCR its blackboard
-        frames into synthetic ``ppt_pages`` rows.  Returns the number of
-        terminal board rows afterwards (0 → nothing recovered; failures
-        are logged, never raised — the caller degrades to the retriable-
-        error path)."""
+        frames into synthetic ``ppt_pages`` rows.  Tries every video URL
+        variant in priority order (gate-selected or injected copy first,
+        then the full candidate list) — one variant may be a silent
+        half-product or rate-limit-refused while another serves the real
+        recording.  Returns the number of terminal board rows afterwards
+        (0 → nothing recovered; failures are logged, never raised — the
+        caller degrades to the retriable-error path)."""
         asset = config.FORCE_AUDIO_MAP.get(sub_id)
         injected = (asset or {}).get("video_url") or self._gate_video_url
-        try:
-            video_url = injected or self._client.get_video_url(
-                course_id, sub_id)
-        except Exception as e:
+        if injected:
+            urls = [injected]
             self._reporter.info(
-                f"    [Board] video url failed: "
-                f"{type(e).__name__}: {e}"
+                "    [Board] using injected/gate-selected healthy video copy."
             )
-            return 0
-        if not video_url:
+        else:
+            try:
+                urls = self._client.get_video_url_candidates(
+                    course_id, sub_id, date=date or None) or []
+            except Exception as e:
+                self._reporter.info(
+                    f"    [Board] video urls failed: "
+                    f"{type(e).__name__}: {e}"
+                )
+                return 0
+            urls = urls[:4]
+        if not urls:
             self._reporter.info("    [Board] no video URL available.")
             return 0
-        if injected:
-            self._reporter.info(
-                "    [Board] using injected healthy video copy."
-            )
-        try:
-            return board_frames.extract_board_pages(
-                self._client, self._db, self._scheduler, self._reporter,
-                course_id, sub_id, video_url, config.AUDIO_DIR,
-            )
-        except Exception as e:
-            self._reporter.info(
-                f"    [Board] extraction failed: "
-                f"{type(e).__name__}: {e}"
-            )
-            return 0
+        recovered = 0
+        for i, video_url in enumerate(urls):
+            if i:
+                self._reporter.info(
+                    f"    [Board] trying video variant #{i} ..."
+                )
+            try:
+                recovered = board_frames.extract_board_pages(
+                    self._client, self._db, self._scheduler, self._reporter,
+                    course_id, sub_id, video_url, config.AUDIO_DIR,
+                )
+            except Exception as e:
+                self._reporter.info(
+                    f"    [Board] variant #{i} failed: "
+                    f"{type(e).__name__}: {str(e)[:160]}"
+                )
+                continue
+            if recovered:
+                break
+        return recovered
 
     def _audio_readiness(self, course_id: str, sub_id: str,
                          date: str) -> tuple[Optional[str], bool]:
@@ -434,6 +451,16 @@ class LectureRunner:
                     f"{type(e).__name__}: {e}")
                 continue
             name = url.split("?", 1)[0].rsplit("/", 1)[-1][:28]
+            if i < 2:
+                # Media-stack identity of the same URL ffprobe sees —
+                # pair with the run's DIAG [req] rows: equal size means
+                # one object (streams merely die early), differing sizes
+                # prove per-object serving (silent proxy vs real file).
+                meta = stream_format_meta(vpn_url, headers)
+                self._reporter.info(
+                    f"    [Gate] media #{i} ({name}): "
+                    f"dur={meta['duration']}s size={meta['size']} "
+                    f"{meta['error'] or ''}")
             if res["ok"]:
                 self._reporter.info(
                     f"    [Gate] variant #{i} ({name}) LIVE: "
