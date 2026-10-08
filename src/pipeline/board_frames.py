@@ -212,7 +212,14 @@ def extract_board_pages(
                               f"— streaming sample instead")
             path, complete = mp4, False
         size = os.path.getsize(path) if os.path.exists(path) else 0
-        if size > 20 * 1024 * 1024:
+        # Offline sampling is only worth trusting on a COMPLETE file: these
+        # mp4s keep the moov index at the tail, so a partial download (even
+        # 85 % of it) decodes ZERO frames (v3: rc=183, empty harvest) while
+        # the streaming path — decode-as-you-receive, no index needed —
+        # reliably yields frames from the same flaky link. A partial file
+        # therefore only accelerates sampling if it happens to be faststart
+        # (harvest catches that); otherwise fall through to streaming.
+        if complete and size > 20 * 1024 * 1024:
             if reporter:
                 reporter.info(
                     f"    [Board] offline sample from downloaded file "

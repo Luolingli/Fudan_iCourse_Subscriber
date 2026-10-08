@@ -796,6 +796,7 @@ class ICourseClient:
         """
         total = 0
         ident_logged = False
+        zero_streak = 0
         for _attempt in range(max_attempts):
             prev_have = (os.path.getsize(output_path)
                          if os.path.exists(output_path) else 0)
@@ -853,10 +854,14 @@ class ICourseClient:
                 now = (os.path.getsize(output_path)
                        if os.path.exists(output_path) else 0)
                 if now - prev_have < (1 << 20):
-                    # Zero-progress attempt (refused/throttled) — cool
-                    # down before re-hitting the endpoint; hammering it
-                    # is how a 41 % cut turns into a 403 window.
-                    time.sleep(20)
+                    # Zero-progress attempt (refused/throttled) — ramped
+                    # cooldown (20/40/60… max 120s): v3 burned its flat
+                    # 12×20s budget inside a rate-limit window that a
+                    # ~10-min ramp would have outlasted.
+                    zero_streak += 1
+                    time.sleep(min(20 * zero_streak, 120))
+                else:
+                    zero_streak = 0
         have = (os.path.getsize(output_path)
                 if os.path.exists(output_path) else 0)
         return output_path, bool(total) and have >= total
