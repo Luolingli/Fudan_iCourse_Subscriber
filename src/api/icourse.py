@@ -614,6 +614,12 @@ class ICourseClient:
         Returns:
             (vpn_url, http_headers) where http_headers is ffmpeg-compatible.
         """
+        # Injected healthy copies live on GitHub release assets — stream
+        # them directly; wrapping them in the campus WebVPN would re-route
+        # through the very egress that served the broken object.
+        if video_url.startswith(("https://github.com/",
+                                 "https://objects.githubusercontent.com/")):
+            return video_url, ""
         vpn_url = get_vpn_url(video_url)
         cookies = "; ".join(
             f"{c.name}={c.value}" for c in self.vpn.session.cookies

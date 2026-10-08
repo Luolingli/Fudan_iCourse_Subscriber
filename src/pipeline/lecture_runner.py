@@ -305,8 +305,11 @@ class LectureRunner:
         terminal board rows afterwards (0 → nothing recovered; failures
         are logged, never raised — the caller degrades to the retriable-
         error path)."""
+        asset = config.FORCE_AUDIO_MAP.get(sub_id)
+        injected = (asset or {}).get("video_url")
         try:
-            video_url = self._client.get_video_url(course_id, sub_id)
+            video_url = injected or self._client.get_video_url(
+                course_id, sub_id)
         except Exception as e:
             self._reporter.info(
                 f"    [Board] video url failed: "
@@ -316,6 +319,10 @@ class LectureRunner:
         if not video_url:
             self._reporter.info("    [Board] no video URL available.")
             return 0
+        if injected:
+            self._reporter.info(
+                "    [Board] using injected healthy video copy."
+            )
         try:
             return board_frames.extract_board_pages(
                 self._client, self._db, self._scheduler, self._reporter,
@@ -463,7 +470,25 @@ class LectureRunner:
         # previous lecture already kicked it off (Phase C), but for the
         # first lecture in the batch we still need to fire it ourselves.
         downloader = self._scheduler.audio_downloader
-        downloader.schedule(self._client, course_id, sub_id)
+        # A manually injected HEALTHY video copy (force_audio video_url,
+        # typically a browser/Campus-egress mp4 rehosted as a GitHub
+        # release asset) replaces the server URL for BOTH the audio pull
+        # and board sampling — this is the dual-line verification path:
+        # the WebVPN egress can serve a dead-audio or placeholder object
+        # under the same path the browser plays fine.
+        asset = config.FORCE_AUDIO_MAP.get(sub_id)
+        injected_video = (asset or {}).get("video_url") if (
+            asset and not asset.get("asr_test")) else None
+        if injected_video:
+            # Phase C may already have scheduled the SERVER url for this
+            # lecture; kill that spawn so schedule() accepts the override.
+            self._release_audio(sub_id)
+            self._reporter.info(
+                "    [Inject] using healthy video copy for ASR "
+                "(force_audio video_url)"
+            )
+        downloader.schedule(self._client, course_id, sub_id,
+                            url=injected_video)
         try:
             handle = downloader.get(sub_id, timeout=120)
         except TimeoutError as e:
@@ -517,7 +542,7 @@ class LectureRunner:
         # the video variant we picked — 泛函分析 664140 carried two
         # 1920x1080 variants, only the first one silent.  Re-download and
         # re-ASR each remaining distinct variant before giving up.
-        if not transcript.strip():
+        if not transcript.strip() and not injected_video:
             transcript, segments = self._retry_alternate_videos(
                 sub_id, course_id, handle, transcript, segments)
 

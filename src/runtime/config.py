@@ -245,6 +245,10 @@ FORCE_SUB_IDS = [
 #    "ppt_url": "https://.../<slides.json>"}
 # LectureRunner 取转录前优先使用注入音频，跳过坏视频下载。
 # url 可缺省（如音轨彻底无语音、只保留课件注入的场合）。
+# 新增 video_url 键：直接把浏览器/校园网出口存的**完整健康 mp4**（同样传成
+# GitHub release 资产）接进来——ASR 与板书抽帧都改用它（经 get_stream_params
+# 的 GitHub 直通，不绕 WebVPN），一条健康原片喂两个消费者，实现与服务端
+# 出口对象的**双线验证**。
 def _load_force_audio() -> dict[str, dict]:
     out: dict[str, dict] = {}
     d = os.path.join(os.getcwd(), "force_audio")
@@ -260,7 +264,9 @@ def _load_force_audio() -> dict[str, dict]:
                 has_url = ((isinstance(url, str) and url)
                            or (isinstance(url, list) and url))
                 has_ppt = isinstance(ppt_url, str) and bool(ppt_url)
-                if not has_url and not has_ppt:
+                has_video = (isinstance(entry.get("video_url"), str)
+                             and bool(entry.get("video_url")))
+                if not has_url and not has_ppt and not has_video:
                     continue
                 sid = str(entry.get("sub_id") or name.rsplit(".", 1)[0])
                 out[sid] = entry
