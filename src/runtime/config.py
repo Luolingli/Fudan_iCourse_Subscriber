@@ -270,3 +270,15 @@ def _load_force_audio() -> dict[str, dict]:
 
 
 FORCE_AUDIO_MAP: dict[str, dict] = _load_force_audio()
+
+# ── 板书兜底（board-from-video）────────────────────────────────────────────
+# 板书型课程（如泛函分析）的 iCourse 截图 feed 常常只有占位屏甚至空，内容
+# 只在视频帧里。当某节课 ASR 空转写 **且** 平台 PPT 无实质文字时，与其记
+# 可重试 error 空等，不如直接从已下载的视频抽帧、dHash 去重、逐帧 OCR，
+# 把板书文字当课件喂给摘要（等价于 2026-09-29 对 664140 的手工恢复）。
+# 置空/0 关闭该兜底。
+BOARD_FALLBACK = os.environ.get("BOARD_FALLBACK", "1").strip().lower() not in ("0", "false", "no", "")
+# 抽帧间隔（秒）。板书内容随时间累积，20s 足够覆盖且不爆 OCR 预算。
+BOARD_FRAME_INTERVAL = int(os.environ.get("BOARD_FRAME_INTERVAL", "20"))
+# 单节最多送去 OCR 的板书帧数（去重后按时间等比截断）。
+BOARD_MAX_PAGES = int(os.environ.get("BOARD_MAX_PAGES", "260"))

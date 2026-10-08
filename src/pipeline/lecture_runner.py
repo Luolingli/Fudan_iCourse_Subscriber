@@ -50,6 +50,7 @@ from urllib.request import urlopen
 import numpy as np
 
 from src.ai import bucketer
+from src.pipeline import board_frames
 from src.pipeline.ppt_pipeline import PPTPipeline
 from src.ai.transcriber import IncompleteAudioError, NoAudioStreamError
 from src.runtime import config
@@ -192,6 +193,13 @@ class LectureRunner:
             ppt_text = "\n".join(
                 p.get("text", "") for p in self._kept_pages(sub_id)
             ).strip()
+            if len(ppt_text) < 300 and config.BOARD_FALLBACK:
+                recovered = self._board_from_video(course_id, sub_id)
+                if recovered:
+                    self._pages_cache.pop(sub_id, None)
+                    ppt_text = "\n".join(
+                        p.get("text", "") for p in self._kept_pages(sub_id)
+                    ).strip()
             if len(ppt_text) >= 300:
                 self._reporter.info(
                     "    Empty transcript — summarizing from PPT text only."
@@ -252,6 +260,36 @@ class LectureRunner:
                 pages = injected
         self._pages_cache[sub_id] = pages
         return pages
+
+    def _board_from_video(self, course_id: str, sub_id: str) -> int:
+        """Last-resort content recovery for board-writing lectures whose
+        platform screenshot feed is empty/placeholder (泛函分析 9.21/9.28):
+        download the lecture video and OCR its blackboard frames into
+        synthetic ``ppt_pages`` rows.  Returns the number of terminal board
+        rows afterwards (0 → nothing recovered; failures are logged, never
+        raised — the caller degrades to the retriable-error path)."""
+        try:
+            video_url = self._client.get_video_url(course_id, sub_id)
+        except Exception as e:
+            self._reporter.info(
+                f"    [Board] video url failed: "
+                f"{type(e).__name__}: {e}"
+            )
+            return 0
+        if not video_url:
+            self._reporter.info("    [Board] no video URL available.")
+            return 0
+        try:
+            return board_frames.extract_board_pages(
+                self._client, self._db, self._scheduler, self._reporter,
+                course_id, sub_id, video_url, config.AUDIO_DIR,
+            )
+        except Exception as e:
+            self._reporter.info(
+                f"    [Board] extraction failed: "
+                f"{type(e).__name__}: {e}"
+            )
+            return 0
 
     def prefetch_first(self, course_id: str, sub_id: str) -> None:
         """Prefetch for the first lecture in the batch — same decision

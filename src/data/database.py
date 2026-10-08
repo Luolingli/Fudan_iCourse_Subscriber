@@ -411,6 +411,20 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_board_page_states(self, sub_id: str,
+                              min_page_num: int) -> list[tuple[int, str]]:
+        """(page_num, ocr_status) for every synthetic board row (page_num
+        >= ``min_page_num``) of one lecture, regardless of status.  Lets
+        ``board_frames`` tell "never attempted" (no rows) apart from
+        "attempted but nothing kept" (rows, zero pending)."""
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT page_num, ocr_status FROM ppt_pages
+                   WHERE sub_id = ? AND page_num >= ?""",
+                (str(sub_id), int(min_page_num)),
+            ).fetchall()
+        return [(int(r[0]), str(r[1])) for r in rows]
+
     def get_done_ppt_pages(self, sub_id: str) -> list[dict]:
         """Successfully-OCR'd pages, sorted by time. Used by the bucketer."""
         with self._lock:
