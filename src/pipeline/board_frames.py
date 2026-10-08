@@ -162,6 +162,7 @@ def extract_board_pages(
     sub_id: str,
     video_url: str,
     workdir: str,
+    duration_hint_s: float | None = None,
 ) -> int:
     """Sample the lecture video (streamed through ffmpeg with reconnect)
     and OCR its blackboard frames.
@@ -173,13 +174,30 @@ def extract_board_pages(
     """
     sub_id = str(sub_id)
     done, pending, total_rows = _board_rows(db, sub_id)
+    # OPEN-COVER short-circuit: previous runs' board rows are indexed by
+    # wall-clock time (page_num = 10000 + frame index), so each attempt
+    # only fills frames it has never OCR'd. With a known media duration
+    # we re-extract while the covered frontier sits below 90 % of it —
+    # every flaky connection reaches a DIFFERENT depth (41 %, 42 %, 85 %
+    # observed), and the union across attempts converges on the whole
+    # lecture. The LLM then summarizes the current best cover; nothing
+    # hinges on one download being complete.
     if total_rows and not pending and done:
+        done_ct, cover_s = db.get_board_coverage(sub_id, BOARD_PAGE_NUM_BASE)
+        if not duration_hint_s or cover_s >= 0.9 * float(duration_hint_s):
+            if reporter:
+                reporter.info(
+                    f"    [Board] cover frontier {cover_s}s of "
+                    f"{int(duration_hint_s) if duration_hint_s else '?'}s"
+                    f" — skipping extraction."
+                )
+            return done
         if reporter:
             reporter.info(
-                f"    [Board] {total_rows} board rows already processed "
-                f"({done} done), skipping extraction."
+                f"    [Board] cover only {cover_s}s of "
+                f"{int(duration_hint_s)}s — re-extracting to extend the "
+                f"open cover (new depth fills untouched page slots only)."
             )
-        return done
     if total_rows and not pending and not done:
         # Previous attempt ended with nothing usable (all failed/invalid or
         # empty-text "done") — e.g. a force_reset race where the platform

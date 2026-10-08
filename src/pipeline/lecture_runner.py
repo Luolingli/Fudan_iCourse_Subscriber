@@ -100,6 +100,12 @@ class LectureRunner:
         # Slide pages (platform-done or injected) per sub_id, shared between
         # the Phase F content check and _summarize; fetched at most once.
         self._pages_cache: dict[str, list[dict]] = {}
+        # Media-stack duration of the CURRENT lecture's audio stream (set
+        # after Phase D). The open-cover board path finalizes only when the
+        # OCR'd frontier reaches 90 % of it — otherwise the lecture stays
+        # Waiting and the next run extends coverage with fresh attempts
+        # (each flaky connection dies at a different depth).
+        self._last_media_duration: Optional[float] = None
         # Live-audio variant chosen by the Phase A3 readiness probe for the
         # CURRENT lecture (None → use the server default).  Reset per run().
         self._gate_video_url: Optional[str] = None
@@ -209,6 +215,10 @@ class LectureRunner:
         transcript, transcript_segments = self._get_transcript(
             existing, course_id, sub_id,
         )
+        # Media-stack duration of this lecture (set by transcribe_tail when
+        # it ran — exactly when the board open-cover path can trigger).
+        self._last_media_duration = getattr(
+            self._transcriber, "_media_duration", None)
         if transcript is None:
             # _get_transcript already logged + persisted the skip reason.
             # Still drain the PPT handle: with defer_ocr the OCR jobs are
@@ -236,6 +246,9 @@ class LectureRunner:
                             for p in self._kept_pages(sub_id)
                         ).strip()
                 if len(ppt_text) >= 300:
+                    if not self._cover_complete(sub_id):
+                        self._release_audio(sub_id)
+                        return None
                     self._reporter.info(
                         "    No usable audio — summarizing from "
                         "video-frame board text only."
@@ -289,14 +302,19 @@ class LectureRunner:
             ppt_text = "\n".join(
                 p.get("text", "") for p in self._kept_pages(sub_id)
             ).strip()
+            used_board = False
             if len(ppt_text) < 300 and config.BOARD_FALLBACK:
                 recovered = self._board_from_video(course_id, sub_id, date)
                 if recovered:
+                    used_board = True
                     self._pages_cache.pop(sub_id, None)
                     ppt_text = "\n".join(
                         p.get("text", "") for p in self._kept_pages(sub_id)
                     ).strip()
             if len(ppt_text) >= 300:
+                if used_board and not self._cover_complete(sub_id):
+                    self._release_audio(sub_id)
+                    return None
                 self._reporter.info(
                     "    Empty transcript — summarizing from PPT text only."
                 )
@@ -400,6 +418,7 @@ class LectureRunner:
                 recovered = board_frames.extract_board_pages(
                     self._client, self._db, self._scheduler, self._reporter,
                     course_id, sub_id, video_url, config.AUDIO_DIR,
+                    duration_hint_s=self._last_media_duration,
                 )
             except Exception as e:
                 self._reporter.info(
@@ -410,6 +429,36 @@ class LectureRunner:
             if recovered:
                 break
         return recovered
+
+    def _cover_complete(self, sub_id: str) -> bool:
+        """Open-cover finalization criterion for board-only summaries:
+        persist only once the OCR'd frontier reaches 90 % of the lecture's
+        known media duration. Below that the lecture flips to a soft
+        Waiting state (zero error budget) and every later run EXTENDS the
+        cover — each flaky download/stream connection dies at a different
+        depth (41 %, 42 %, 85 % observed today) and only OCR's the time
+        slots not yet covered, so the union converges on the whole
+        lecture instead of a single connection's fate deciding it.
+        Unknown duration → nothing to wait for → treat as complete."""
+        dur = self._last_media_duration
+        if not dur:
+            return True
+        done_ct, frontier = self._db.get_board_coverage(
+            sub_id, board_frames.BOARD_PAGE_NUM_BASE)
+        if done_ct == 0 and frontier == 0:
+            return True  # no synthetic board rows at all → summary is
+            # platform-feed/injected based; nothing to extend, don't gate
+        if frontier >= 0.9 * float(dur):
+            return True
+        self._db.set_waiting(
+            sub_id, "waiting_cover",
+            f"board open-cover frontier {int(frontier)}s of {int(dur)}s — "
+            f"extending across runs before finalizing")
+        self._reporter.info(
+            f"    [Board] open cover {int(frontier)}s / {int(dur)}s (<90%) "
+            f"— Waiting to extend, not finalizing a partial-cover summary."
+        )
+        return False
 
     def _audio_readiness(self, course_id: str, sub_id: str,
                          date: str) -> tuple[Optional[str], bool]:

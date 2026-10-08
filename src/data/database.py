@@ -440,6 +440,23 @@ class Database:
             ).fetchall()
         return [(int(r[0]), str(r[1])) for r in rows]
 
+    def get_board_coverage(self, sub_id: str, min_page_num: int) -> tuple:
+        """(done_with_text, frontier_sec) over synthetic board rows. The
+        coverage FRONTIER counts every 'done' row — a legibly-empty
+        stretch is still covered time, just without new ink — while the
+        count only takes rows with text (content proof)."""
+        with self._lock:
+            row = self.conn.execute(
+                """SELECT SUM(CASE WHEN text IS NOT NULL AND text != ''
+                                   THEN 1 ELSE 0 END),
+                          COALESCE(MAX(created_sec), 0)
+                   FROM ppt_pages
+                   WHERE sub_id = ? AND page_num >= ?
+                     AND ocr_status = 'done'""",
+                (str(sub_id), int(min_page_num)),
+            ).fetchone()
+        return (int(row[0] or 0), int(row[1] or 0))
+
     def reset_board_pages(self, sub_id: str, min_page_num: int) -> int:
         """Re-arm synthetic board rows for re-OCR: rows that reached a
         terminal state but carry no usable text (failed/invalid/done-with-
