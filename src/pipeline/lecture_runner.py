@@ -180,19 +180,33 @@ class LectureRunner:
         # otherwise record an error so the lecture is retried next run and
         # abandoned only once error_count hits the retry cap.
         if not transcript.strip():
-            if self._kept_pages(sub_id):
+            # No audio segments.  iCourse lectures are recorded lectures
+            # that always have audio, so an empty transcript means a
+            # placeholder (still transcoding/releasing, e.g. the 30-char
+            # "录像操作指南" guide screen) or a broken recording.  Only
+            # generate a PPT-only summary if the PPT has substantial real
+            # content (a legitimate no-audio lecture); a placeholder has
+            # little/no PPT text — treat that as no-usable-content and
+            # record a retriable error instead of marking processed (which
+            # would make the lecture permanently un-retryable).
+            ppt_text = "\n".join(
+                p.get("text", "") for p in self._kept_pages(sub_id)
+            ).strip()
+            if len(ppt_text) >= 300:
                 self._reporter.info(
                     "    Empty transcript — summarizing from PPT text only."
                 )
             else:
                 self._reporter.info(
-                    "    No usable content (empty transcript, no PPT "
-                    "text) — will retry next run."
+                    "    No usable content (empty transcript, no substantial "
+                    "PPT text) — placeholder or broken recording, will "
+                    "retry next run."
                 )
                 self._release_audio(sub_id)
                 self._db.update_error(
                     sub_id, "transcribe",
-                    "empty transcript and no usable PPT text",
+                    "empty transcript and no substantial PPT text "
+                    "(placeholder or broken recording)",
                 )
                 return None
 
