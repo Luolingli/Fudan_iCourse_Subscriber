@@ -713,3 +713,62 @@ class ICourseClient:
         size_mb = downloaded / (1024 * 1024)
         print(f"    Downloaded: {size_mb:.1f}MB in {elapsed:.0f}s")
         return output_path
+
+    def download_video_resumable(
+        self,
+        video_url: str,
+        output_path: str,
+        max_attempts: int = 12,
+        timeout: int = 600,
+    ) -> tuple[str, bool]:
+        """Range-resume loop for objects whose delivery keeps dying mid-file.
+
+        WebVPN egress cuts lecture downloads at ~41% over and over (the
+        669978 board fallback only ever got ~67 of 162 min because its
+        streaming sample pass died the same way). Every attempt requests
+        ``bytes=<have>-`` and appends; a 200 answer (server ignored the
+        range) restarts the file cleanly. Connection resets mid-chunk are
+        just the next attempt's problem. Returns (path, complete) — the
+        caller decides between offline sampling (complete) and the
+        streaming fallback (partial).
+        """
+        total = 0
+        for _attempt in range(max_attempts):
+            try:
+                have = (os.path.getsize(output_path)
+                        if os.path.exists(output_path) else 0)
+                if total and have >= total:
+                    return output_path, True
+                getter = (self.vpn.get_raw
+                          if video_url.startswith(config.WEBVPN_BASE)
+                          else self.vpn.get)
+                resp = getter(
+                    video_url, stream=True, timeout=timeout,
+                    headers=({"Range": f"bytes={have}-"} if have else {}),
+                )
+                try:
+                    resp.raise_for_status()
+                    if "html" in resp.headers.get("content-type", "").lower():
+                        raise RuntimeError(
+                            "download blocked (html error page)")
+                    cl = resp.headers.get("content-length")
+                    mode = "wb"
+                    if resp.status_code == 206 and cl:
+                        total = have + int(cl)
+                        mode = "ab"
+                    elif cl:
+                        total = int(cl)
+                        have = 0
+                    with open(output_path, mode) as f:
+                        if mode == "wb":
+                            f.truncate(0)
+                        for chunk in resp.iter_content(chunk_size=1 << 16):
+                            f.write(chunk)
+                finally:
+                    resp.close()
+            except Exception as e:
+                print(f"    resume attempt died: "
+                      f"{type(e).__name__}: {str(e)[:120]}", flush=True)
+        have = (os.path.getsize(output_path)
+                if os.path.exists(output_path) else 0)
+        return output_path, bool(total) and have >= total

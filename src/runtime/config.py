@@ -288,7 +288,7 @@ BOARD_FALLBACK = os.environ.get("BOARD_FALLBACK", "1").strip().lower() not in ("
 # 抽帧间隔（秒）。板书内容随时间累积，20s 足够覆盖且不爆 OCR 预算。
 BOARD_FRAME_INTERVAL = int(os.environ.get("BOARD_FRAME_INTERVAL", "20"))
 # 单节最多送去 OCR 的板书帧数（去重后按时间等比截断）。
-BOARD_MAX_PAGES = int(os.environ.get("BOARD_MAX_PAGES", "260"))
+BOARD_MAX_PAGES = int(os.environ.get("BOARD_MAX_PAGES", "320"))
 
 # ── 音轨验货闸（readiness gate）──────────────────────────────────────────
 # 处理新课前，先对每个视频候选（含 /play/1/ 播放口路径）抽两段短窗实测音频
@@ -297,14 +297,15 @@ BOARD_MAX_PAGES = int(os.environ.get("BOARD_MAX_PAGES", "260"))
 # 整节挂 waiting 软状态每天重探——不吃 3 次 error 配额、不进流程、不出
 # 半吊子摘要；一旦探到活音轨自动用该候选走正流程。超过 GATE_MAX_DAYS 仍
 # 全哑 → 放行（板书兜底从真实画面抢救内容）。置 0 关闭。
+# ── 新鲜度 gap（fixed freshness gap）────────────────────────────────────
+# 学校对录播的处理(转码+混音+截屏)在课后持续数天,期间 CDN 供的是半成品:
+# 完整但哑音的代理文件 / 41% 截断的大文件 / 只有指南屏的 feed。审核标志
+# (code 7001)只覆盖最早期,过标后产物仍可能是半成品——唯一可靠判据是
+# probe_audio 实测。gap 让新课先躺平:课后满 LECTURE_MIN_AGE_DAYS 天才允许
+# 首次处理(零成本日期判断);届时音轨活→正流程,仍哑→每天 waiting 重探,
+# 满 AUDIO_GATE_MAX_DAYS 天还不活即认定"混流不会来了",走板书补全
+# (断点续传整片→离线抽帧,全 162 分钟覆盖)。用户 2026-10-08:固定 gap
+# 两三天,每次课程都要补全,不留半份。
+LECTURE_MIN_AGE_DAYS = int(os.environ.get("LECTURE_MIN_AGE_DAYS", "2"))
 AUDIO_GATE = os.environ.get("AUDIO_GATE", "1").strip().lower() not in ("0", "false", "no", "")
-AUDIO_GATE_MAX_DAYS = int(os.environ.get("AUDIO_GATE_MAX_DAYS", "7"))
-# 按课程"无限等待活音轨"名单（逗号分隔 course_id，默认 37547=泛函分析）：
-# 名单内课程即使哑超过 GATE_MAX_DAYS 也**不走板书妥协**——老师口述权重高，
-# 宁可一直挂着（就绪闸每日重探、前端 Waiting、零配额消耗）也不出只有板书
-# 的半份摘要；学校把真混流推上 CDN 的那天，自动出完整音频+板书摘要。
-HOLD_WAIT_AUDIO_COURSES = [
-    s.strip()
-    for s in os.environ.get("HOLD_WAIT_AUDIO_COURSES", "37547").split(",")
-    if s.strip()
-]
+AUDIO_GATE_MAX_DAYS = int(os.environ.get("AUDIO_GATE_MAX_DAYS", "3"))

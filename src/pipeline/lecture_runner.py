@@ -134,6 +134,28 @@ class LectureRunner:
                 return None
             return existing["summary"]
 
+        # ── Phase A1.5 — fixed freshness gap.  The school keeps
+        # processing recordings for days after class (transcode → audio
+        # mix → screenshot job), and until that finishes the CDN serves
+        # half-products to CI: complete-but-silent proxy videos, objects
+        # cut at ~41 %, guide-screen-only feeds.  The 审核中 flag (A2)
+        # only covers the earliest window — artifacts stay half-baked
+        # after it clears (泛函 9.21/9.28).  Cheapest possible check:
+        # lecture date vs LECTURE_MIN_AGE_DAYS, no API, no probe; young
+        # lectures are simply left in the queue (frontend shows them as
+        # Waiting) and re-offered daily.  (user 2026-10-08: 固定 gap 两
+        # 三天, 每次都要补全, 不留半份。)
+        if config.LECTURE_MIN_AGE_DAYS > 0:
+            _age = _lecture_age_days(date)
+            if _age is not None and _age < config.LECTURE_MIN_AGE_DAYS:
+                self._reporter.info(
+                    f"    Too fresh ({_age}d < "
+                    f"{config.LECTURE_MIN_AGE_DAYS}d gap) — waiting for "
+                    f"the school to finish processing."
+                )
+                self._schedule_next(next_info)
+                return None
+
         # ── Phase A2 — skip lectures still in the pre-release review
         # gate (审核中).  The platform serves placeholder artifacts in
         # the pre-release slot (operation-guide PPT screenshot + a
@@ -429,16 +451,6 @@ class LectureRunner:
                     f"max={res['max']:.4f}≈median={res['median']:.4f} "
                     f"speech_frac={res['speech_frac']:.0%}")
         age = _lecture_age_days(date)
-        if str(course_id) in config.HOLD_WAIT_AUDIO_COURSES:
-            self._db.set_waiting(
-                sub_id, "waiting_audio",
-                "silent audio on all variants — course held indefinitely "
-                "for the real mix (HOLD_WAIT_AUDIO_COURSES)")
-            self._reporter.info(
-                "    [Gate] held indefinitely (HOLD_WAIT_AUDIO_COURSES): "
-                "board-only compromise disabled for this course — re-probed "
-                "daily until live audio lands on the CDN.")
-            return None, False
         if age is None or age >= config.AUDIO_GATE_MAX_DAYS:
             self._reporter.info(
                 f"    [Gate] all variants silent and lecture "

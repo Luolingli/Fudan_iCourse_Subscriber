@@ -193,11 +193,32 @@ def extract_board_pages(
             )
 
     frame_dir = os.path.join(workdir, f"{sub_id}_frames")
+    mp4 = os.path.join(workdir, f"{sub_id}_board.mp4")
     interval = max(5, int(config.BOARD_FRAME_INTERVAL))
     try:
-        vpn_url, headers = client.get_stream_params(video_url)
-        frames = _sample_frames(vpn_url, frame_dir, interval, reporter,
-                                headers)
+        # Best-effort FULL download first: a complete file sampled offline
+        # gives 100 % board coverage. A partial (41 %-truncated) download is
+        # no better than a live stream, so we only trust it when it reached
+        # the server's declared length; otherwise stream-sample as before.
+        frames = None
+        try:
+            path, complete = client.download_video_resumable(video_url, mp4)
+        except Exception as e:
+            if reporter:
+                reporter.info(f"    [Board] download failed ({type(e).__name__}) "
+                              f"— streaming sample instead")
+            path, complete = mp4, False
+        if complete and os.path.getsize(path) > 1_000_000:
+            if reporter:
+                reporter.info(
+                    f"    [Board] full video downloaded "
+                    f"({os.path.getsize(path)/1e6:.0f} MB) — offline sample "
+                    f"(complete coverage)")
+            frames = _sample_frames(path, frame_dir, interval, reporter, "")
+        if not frames:
+            vpn_url, headers = client.get_stream_params(video_url)
+            frames = _sample_frames(vpn_url, frame_dir, interval, reporter,
+                                    headers)
         if not frames:
             return 0
         if reporter:
@@ -283,3 +304,8 @@ def extract_board_pages(
         return done
     finally:
         shutil.rmtree(frame_dir, ignore_errors=True)
+        if os.path.exists(mp4):
+            try:
+                os.remove(mp4)
+            except OSError:
+                pass
