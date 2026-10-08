@@ -196,10 +196,13 @@ def extract_board_pages(
     mp4 = os.path.join(workdir, f"{sub_id}_board.mp4")
     interval = max(5, int(config.BOARD_FRAME_INTERVAL))
     try:
-        # Best-effort FULL download first: a complete file sampled offline
-        # gives 100 % board coverage. A partial (41 %-truncated) download is
-        # no better than a live stream, so we only trust it when it reached
-        # the server's declared length; otherwise stream-sample as before.
+        # Best-effort download first; then sample from the FILE whenever it's
+        # usable. A complete file (server-declared length reached) gives 100 %
+        # board coverage; even an incomplete-but-substantial file decodes
+        # offline to far more frames than a live stream that WebVPN cuts at
+        # ~41 % (and the stream path is additionally prone to sporadic
+        # 403/rate-limit deaths after burst traffic — 2026-10-08). Only fall
+        # back to streaming when the download yielded nothing worth decoding.
         frames = None
         try:
             path, complete = client.download_video_resumable(video_url, mp4)
@@ -208,13 +211,29 @@ def extract_board_pages(
                 reporter.info(f"    [Board] download failed ({type(e).__name__}) "
                               f"— streaming sample instead")
             path, complete = mp4, False
-        if complete and os.path.getsize(path) > 1_000_000:
+        size = os.path.getsize(path) if os.path.exists(path) else 0
+        if size > 20 * 1024 * 1024:
             if reporter:
                 reporter.info(
-                    f"    [Board] full video downloaded "
-                    f"({os.path.getsize(path)/1e6:.0f} MB) — offline sample "
-                    f"(complete coverage)")
-            frames = _sample_frames(path, frame_dir, interval, reporter, "")
+                    f"    [Board] offline sample from downloaded file "
+                    f"({size / 1e6:.0f} MB"
+                    + (", complete)" if complete else ", partial — best effort)")
+                )
+            try:
+                frames = _sample_frames(path, frame_dir, interval, reporter, "")
+            except Exception as e:
+                # Decoding a truncated file exits non-zero AT the cut point,
+                # but every jpg emitted before it is real — harvest them.
+                if reporter:
+                    reporter.info(
+                        f"    [Board] offline decode stopped early "
+                        f"({type(e).__name__}) — harvesting partial frames"
+                    )
+                frames = sorted(
+                    os.path.join(frame_dir, n)
+                    for n in os.listdir(frame_dir)
+                    if n.endswith(".jpg")
+                ) if os.path.isdir(frame_dir) else []
         if not frames:
             vpn_url, headers = client.get_stream_params(video_url)
             frames = _sample_frames(vpn_url, frame_dir, interval, reporter,

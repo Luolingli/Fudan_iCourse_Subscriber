@@ -198,7 +198,7 @@ class Database:
         return {row["sub_id"] for row in rows}
 
     def get_abandoned_sub_ids(self, course_id: str,
-                              max_errors: int = 3) -> set[str]:
+                              max_errors: int = 8) -> set[str]:
         """Return sub_ids that exhausted their retry budget without ever
         being processed (error_count >= max_errors, processed_at NULL).
 
@@ -265,7 +265,7 @@ class Database:
         return (cur.rowcount or 0) > 0
 
     def get_unprocessed_lectures(self, course_id: str | None = None,
-                                  max_errors: int = 3) -> list[dict]:
+                                  max_errors: int = 8) -> list[dict]:
         """Return lectures that need (re-)processing.
 
         Only returns lectures whose ``error_count`` is below *max_errors* —
