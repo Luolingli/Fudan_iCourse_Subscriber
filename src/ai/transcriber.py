@@ -535,6 +535,7 @@ class Transcriber:
         last_report = t0
         last_segment_at = 0.0
         silence_marked = False
+        rms_frames: list[float] = []   # per-1s RMS, for empty-transcript forensics
 
         while True:
             now = time.time()
@@ -554,6 +555,7 @@ class Transcriber:
             total_bytes += len(raw)
             samples = np.frombuffer(raw, dtype=np.float32)
             total_read += len(samples)
+            rms_frames.append(float(np.sqrt(np.mean(samples * samples))))
             audio_pos = total_read / SAMPLE_RATE
 
             # Progress report every 60 s
@@ -679,6 +681,29 @@ class Transcriber:
             print(
                 f"[Transcriber] WARNING: audio ended with {gap_min:.0f} min "
                 f"of silence after {last_segment_at / 60:.0f} min",
+                flush=True,
+            )
+
+        # ── Audio forensics: envelope + source stream ────────────────────
+        # Logged on every run so an empty transcript can be attributed:
+        # flat envelope → the extracted audio really is silent (dead/encrypted
+        # track or wrong track selected); peaked envelope with 0 segments →
+        # the VAD/ASR is failing on audible speech.
+        stderr_text = stderr_output.decode(errors="replace")
+        for line in stderr_text.splitlines():
+            if "Stream #" in line and "Audio:" in line:
+                print(f"[Transcriber] AUDIO STREAM: {line.strip()}",
+                      flush=True)
+        if rms_frames:
+            env = np.asarray(rms_frames)
+            noise_floor = float(np.percentile(env, 20))
+            speech_frac = float(np.mean(env > max(3 * noise_floor, 1e-4)))
+            print(
+                f"[Transcriber] AUDIO ENVELOPE ({len(env)} 1s frames): "
+                f"max={env.max():.5f} median={np.median(env):.5f} "
+                f"p95={np.percentile(env, 95):.5f} "
+                f"speech_frac={speech_frac:.0%} "
+                f"(silence~0%, real speech~10-60%)",
                 flush=True,
             )
 
