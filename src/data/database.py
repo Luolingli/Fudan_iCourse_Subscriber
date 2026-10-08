@@ -457,6 +457,35 @@ class Database:
             ).fetchone()
         return (int(row[0] or 0), int(row[1] or 0))
 
+    def bump_cover_stall(self, sub_id: str, frontier: int) -> int:
+        """Count consecutive coverage-frontier checks with NO advancement
+        (open-cover stall escape). Stores ``frontier:stall`` under
+        ``board_cover_<sub_id>`` in meta; the counter resets whenever the
+        frontier moves, so only a genuinely stuck cover triggers the
+        caller's early-finalize."""
+        key = f"board_cover_{sub_id}"
+        with self._lock, self.conn:
+            row = self.conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (key,)
+            ).fetchone()
+            stall = 0
+            if row:
+                try:
+                    last_f, last_s = row[0].split(":")
+                    if int(last_f) == int(frontier):
+                        stall = int(last_s) + 1
+                except (ValueError, AttributeError):
+                    stall = 0
+            self.conn.execute(
+                """INSERT INTO meta (key, value, updated_at)
+                   VALUES (?, ?, strftime('%s','now'))
+                   ON CONFLICT(key) DO UPDATE SET
+                       value = excluded.value,
+                       updated_at = excluded.updated_at""",
+                (key, f"{int(frontier)}:{stall}"),
+            )
+        return stall
+
     def reset_board_pages(self, sub_id: str, min_page_num: int) -> int:
         """Re-arm synthetic board rows for re-OCR: rows that reached a
         terminal state but carry no usable text (failed/invalid/done-with-

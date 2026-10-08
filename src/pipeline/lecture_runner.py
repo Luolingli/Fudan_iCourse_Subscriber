@@ -450,6 +450,19 @@ class LectureRunner:
             # platform-feed/injected based; nothing to extend, don't gate
         if frontier >= 0.9 * float(dur):
             return True
+        # Stall escape (open-cover philosophy, user 2026-10-08: "开覆盖 +
+        # LLM 自己总结"): if three consecutive extension runs advanced the
+        # frontier ZERO (link depth plateaus below 90 % forever), stop
+        # holding the lecture hostage to the last few minutes and
+        # finalize from the union we do have.
+        stall = self._db.bump_cover_stall(sub_id, frontier)
+        if stall >= 2:
+            self._reporter.info(
+                f"    [Board] cover stalled at {int(frontier)}s/"
+                f"{int(dur)}s for {stall + 1} checks — finalizing from "
+                f"current union (LLM summarizes the available cover)."
+            )
+            return True
         self._db.set_waiting(
             sub_id, "waiting_cover",
             f"board open-cover frontier {int(frontier)}s of {int(dur)}s — "
