@@ -909,8 +909,8 @@ class Transcriber:
 
 
 def probe_audio(url: str, headers: str = "",
-                positions: tuple[int, ...] = (0, 900),
-                window_s: int = 120) -> dict:
+                positions: tuple[int, ...] = (0, 600),
+                window_s: int = 60) -> dict:
     """Stream one short slice of a video URL through ffmpeg and report
     whether the audio carries live dynamics — the readiness probe that
     distinguishes a real recording from a pre-release placeholder (dead /

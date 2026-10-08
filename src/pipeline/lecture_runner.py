@@ -153,7 +153,7 @@ class LectureRunner:
         # Review-lifting (A2) does not guarantee the served bytes are the
         # final cut: the platform can expose video_list/playback objects
         # whose AUDIO track is still the pre-mix silent copy (泛函分析
-        # 9.21/9.28) for days.  A cheap streaming audio probe (a 120s window
+        # 9.21/9.28) for days.  A cheap streaming audio probe (60s windows
         # per variant, no full download, no ASR model) tells placeholder
         # from real lecture audio BEFORE we spend a slot + LLM on it.
         # Silent-and-recent → soft Waiting (error_count stays 0, re-probed
@@ -376,7 +376,7 @@ class LectureRunner:
                          date: str) -> tuple[Optional[str], bool]:
         """Phase A3 gate — (live_variant_url, proceed).
 
-        Streams a 120 s window of every video variant (default storage
+        Streams 60 s windows of every video variant (default storage
         paths first, then the /play/1/ playback paths appended by
         get_video_url_candidates) through ffmpeg and measures audio
         dynamics.  Returns as soon as one variant shows speech-like
