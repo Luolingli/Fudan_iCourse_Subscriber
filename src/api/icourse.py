@@ -785,14 +785,23 @@ class ICourseClient:
     ) -> tuple[str, bool]:
         """Range-resume loop for objects whose delivery keeps dying mid-file.
 
-        WebVPN egress cuts lecture downloads at ~41% over and over (the
-        669978 board fallback only ever got ~67 of 162 min because its
-        streaming sample pass died the same way). Every attempt requests
-        ``bytes=<have>-`` and appends; a 200 answer (server ignored the
-        range) restarts the file cleanly. Connection resets mid-chunk are
-        just the next attempt's problem. Returns (path, complete) — the
-        caller decides between offline sampling (complete) and the
-        streaming fallback (partial).
+        WebVPN egress cuts lecture downloads at ~41% over and over. Every
+        attempt requests ``bytes=<have>-`` and appends; completion is
+        decided from the SERVER'S OWN accounting, not just an advertised
+        total (v4 post-mortem, 2026-10-08):
+
+        * clean EOF on a 200 response  → the body it promised is the whole
+          resource (chunked responses advertise no content-length; the old
+          code spun there, sent a follow-up Range, and got a 416 wall while
+          a perfectly complete file sat on disk).
+        * 416 Requested Range Not Satisfiable → our offset is already at/
+          past the resource end → what we hold IS the complete object.
+        * 206 + content-length → classic resume, complete when have>=total.
+
+        Zero-progress attempts back off 20→120s (ramped) so a transient
+        rate-limit window is outlasted instead of hammered. Returns
+        (path, complete); the caller uses offline sampling on complete
+        files and the streaming fallback otherwise.
         """
         total = 0
         ident_logged = False
@@ -800,6 +809,7 @@ class ICourseClient:
         for _attempt in range(max_attempts):
             prev_have = (os.path.getsize(output_path)
                          if os.path.exists(output_path) else 0)
+            complete_now = False
             try:
                 have = prev_have
                 if total and have >= total:
@@ -812,56 +822,65 @@ class ICourseClient:
                     headers=({"Range": f"bytes={have}-"} if have else {}),
                 )
                 try:
-                    resp.raise_for_status()
-                    if "html" in resp.headers.get("content-type", "").lower():
-                        raise RuntimeError(
-                            "download blocked (html error page)")
-                    cl = resp.headers.get("content-length")
-                    mode = "wb"
-                    if resp.status_code == 206 and cl:
-                        total = have + int(cl)
-                        mode = "ab"
-                    elif cl:
-                        total = int(cl)
-                        have = 0
-                    if not ident_logged:
-                        # Object identity for egress forensics: comparing
-                        # size+etag against the browser's view of the same
-                        # URL answers whether the platform serves ONE file
-                        # (our streams just die early) or a different,
-                        # silent PROXY object to non-media-stack clients.
-                        # Browser truth sample (669978, 2026-10-08):
-                        #   content-length 2686401109, etag
-                        #   "6ab9f312-a01f3a55" (hex tail == size).
-                        ident_logged = True
-                        print(
-                            f"    [obj] status={resp.status_code} "
-                            f"total={total} "
-                            f"etag={resp.headers.get('etag')} "
-                            f"accept-ranges={resp.headers.get('accept-ranges')}",
-                            flush=True,
-                        )
-                    with open(output_path, mode) as f:
-                        if mode == "wb":
-                            f.truncate(0)
-                        for chunk in resp.iter_content(chunk_size=1 << 16):
-                            f.write(chunk)
+                    if resp.status_code == 416:
+                        resp.close()
+                        complete_now = have > 0
+                    else:
+                        resp.raise_for_status()
+                        if "html" in (resp.headers.get("content-type")
+                                      or "").lower():
+                            raise RuntimeError(
+                                "download blocked (html error page)")
+                        cl = resp.headers.get("content-length")
+                        mode = "wb"
+                        if resp.status_code == 206 and cl:
+                            total = have + int(cl)
+                            mode = "ab"
+                        elif cl:
+                            total = int(cl)
+                        if not ident_logged:
+                            # Object identity for egress forensics (etag
+                            # hex tail == byte size; browser truth sample
+                            # for 669978: 2686401109 / "6ab9f312-a01f3a55"
+                            # — CI and browser see the SAME object).
+                            ident_logged = True
+                            print(
+                                f"    [obj] status={resp.status_code} "
+                                f"total={total} "
+                                f"etag={resp.headers.get('etag')} "
+                                f"accept-ranges="
+                                f"{resp.headers.get('accept-ranges')}",
+                                flush=True,
+                            )
+                        with open(output_path, mode) as f:
+                            if mode == "wb":
+                                f.truncate(0)
+                            for chunk in resp.iter_content(
+                                    chunk_size=1 << 16):
+                                f.write(chunk)
+                        if resp.status_code == 200:
+                            have2 = (os.path.getsize(output_path)
+                                     if os.path.exists(output_path)
+                                     else 0)
+                            complete_now = have2 > 0 and (
+                                not total or have2 >= total)
                 finally:
-                    resp.close()
+                    try:
+                        resp.close()
+                    except Exception:
+                        pass
             except Exception as e:
                 print(f"    resume attempt died: "
                       f"{type(e).__name__}: {str(e)[:120]}", flush=True)
-                now = (os.path.getsize(output_path)
-                       if os.path.exists(output_path) else 0)
-                if now - prev_have < (1 << 20):
-                    # Zero-progress attempt (refused/throttled) — ramped
-                    # cooldown (20/40/60… max 120s): v3 burned its flat
-                    # 12×20s budget inside a rate-limit window that a
-                    # ~10-min ramp would have outlasted.
-                    zero_streak += 1
-                    time.sleep(min(20 * zero_streak, 120))
-                else:
-                    zero_streak = 0
+            if complete_now:
+                return output_path, True
+            now = (os.path.getsize(output_path)
+                   if os.path.exists(output_path) else 0)
+            if now - prev_have < (1 << 20):
+                zero_streak += 1
+                time.sleep(min(20 * zero_streak, 120))
+            else:
+                zero_streak = 0
         have = (os.path.getsize(output_path)
                 if os.path.exists(output_path) else 0)
         return output_path, bool(total) and have >= total
