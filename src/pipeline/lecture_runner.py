@@ -393,7 +393,7 @@ class LectureRunner:
         """
         try:
             candidates = self._client.get_video_url_candidates(
-                course_id, sub_id)
+                course_id, sub_id, date=date)
         except Exception as e:
             self._reporter.info(
                 f"    [Gate] candidates unavailable "

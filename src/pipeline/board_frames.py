@@ -173,13 +173,24 @@ def extract_board_pages(
     """
     sub_id = str(sub_id)
     done, pending, total_rows = _board_rows(db, sub_id)
-    if total_rows and not pending:
+    if total_rows and not pending and done:
         if reporter:
             reporter.info(
                 f"    [Board] {total_rows} board rows already processed "
                 f"({done} done), skipping extraction."
             )
         return done
+    if total_rows and not pending and not done:
+        # Previous attempt ended with nothing usable (all failed/invalid or
+        # empty-text "done") — e.g. a force_reset race where the platform
+        # PPT pipeline "fetched" our videoframe pseudo-URLs and marked them
+        # failed.  Re-arm and redo instead of stranding the lecture.
+        rearmed = db.reset_board_pages(sub_id, BOARD_PAGE_NUM_BASE)
+        if reporter and rearmed:
+            reporter.info(
+                f"    [Board] re-armed {rearmed} empty/failed rows "
+                f"for re-OCR."
+            )
 
     frame_dir = os.path.join(workdir, f"{sub_id}_frames")
     interval = max(5, int(config.BOARD_FRAME_INTERVAL))

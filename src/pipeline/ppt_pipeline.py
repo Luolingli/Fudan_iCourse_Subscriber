@@ -302,7 +302,17 @@ class PPTPipeline:
 
         # Stage 2 — image bytes for every still-pending row.  Cache first,
         # sync re-download for stale rows from a prior interrupted run.
-        pending = self._db.get_pending_ppt_pages(sub_id)
+        # Synthetic board rows (page_num >= BOARD_PAGE_NUM_BASE, from
+        # board_frames) are EXCLUDED: their "pptimgurl" is a videoframe:
+        # tag, not a fetchable URL — after a force_reset set them pending,
+        # letting this loop "download" them would mark them all failed and
+        # strand the lecture (669978, 2026-10-08).  The board pipeline
+        # owns re-OCR of those rows.
+        from src.pipeline.board_frames import BOARD_PAGE_NUM_BASE
+        pending = [
+            p for p in self._db.get_pending_ppt_pages(sub_id)
+            if int(p["page_num"]) < BOARD_PAGE_NUM_BASE
+        ]
         images: dict[int, bytes] = {}
         failed = 0
         for p in pending:

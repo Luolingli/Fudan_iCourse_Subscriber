@@ -440,6 +440,23 @@ class Database:
             ).fetchall()
         return [(int(r[0]), str(r[1])) for r in rows]
 
+    def reset_board_pages(self, sub_id: str, min_page_num: int) -> int:
+        """Re-arm synthetic board rows for re-OCR: rows that reached a
+        terminal state but carry no usable text (failed/invalid/done-with-
+        empty) go back to 'pending'.  Done rows WITH text are untouched,
+        so a healthy prior extraction is never redone.  Covers force_reset
+        races where the platform PPT pipeline used to poison these rows by
+        "fetching" their videoframe: pseudo-URLs."""
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """UPDATE ppt_pages SET ocr_status = 'pending'
+                   WHERE sub_id = ? AND page_num >= ?
+                     AND (ocr_status != 'done'
+                          OR text IS NULL OR text = '')""",
+                (str(sub_id), int(min_page_num)),
+            )
+            return cur.rowcount or 0
+
     def get_done_ppt_pages(self, sub_id: str) -> list[dict]:
         """Successfully-OCR'd pages, sorted by time. Used by the bucketer."""
         with self._lock:

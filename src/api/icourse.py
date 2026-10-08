@@ -504,8 +504,15 @@ class ICourseClient:
         return candidates[0] if candidates else None
 
     def get_video_url_candidates(self, course_id: str,
-                                 sub_id: str) -> list[str]:
+                                 sub_id: str,
+                                 date: str | None = None) -> list[str]:
         """Get signed MP4 video URLs for a lecture, highest priority first.
+
+        ``date`` (lecture's YYYY-MM-DD, optional) enables the playback-path
+        derivation for storage URLs whose own path lacks the date segment —
+        the player serves files under /play/1/defaultnew/<date>/<file> and
+        that path may resolve to a different physical object than the API
+        metadata path (browser-audio vs WebVPN-silent mystery, 669978).
 
         Cascades through URL sources, most- to least-preferred:
           1. info.video_list[*].preview_url     — healthy lecture
@@ -608,11 +615,17 @@ class ICourseClient:
             parsed = urlparse(base)
             if "/play/1/" in parsed.path:
                 continue
-            m = re.search(r"(\d{4}-\d{2}-\d{2})/([^/?]+\.mp4)", parsed.path)
-            if not m:
+            fname = parsed.path.rsplit("/", 1)[-1]
+            if not fname.endswith(".mp4"):
+                continue
+            m = re.search(r"(\d{4}-\d{2}-\d{2})", parsed.path)
+            play_date = m.group(1) if m else (
+                str(date)[:10] if date and re.fullmatch(
+                    r"\d{4}-\d{2}-\d{2}", str(date)[:10]) else None)
+            if not play_date:
                 continue
             play = (f"{parsed.scheme}://{parsed.netloc}/play/1/defaultnew"
-                    f"/{m.group(1)}/{m.group(2)}")
+                    f"/{play_date}/{fname}")
             play_extra.append((play, f"playback[{src}]"))
         base_urls += play_extra
 
