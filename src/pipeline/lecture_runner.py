@@ -141,6 +141,27 @@ class LectureRunner:
                 return None
             return existing["summary"]
 
+        # ── Phase A0 — direct summary restore.  A force_audio/<sub>.json
+        # asset may carry a "summary" field holding an already-delivered
+        # summary recovered from a sent email (after a force-reset wiped
+        # the DB copy).  Write it back, mark processed + emailed (so it
+        # is NOT re-sent), clear any error, and stop — bypasses ASR /
+        # board / LLM entirely.
+        _asset = config.FORCE_AUDIO_MAP.get(sub_id) or {}
+        _restore = (_asset.get("summary") or "").strip()
+        if _restore:
+            self._db.update_summary(sub_id, _restore, "restored-from-email")
+            self._db.mark_processed(sub_id)
+            self._db.mark_emailed(sub_id)
+            self._db.clear_error(sub_id)
+            self._reporter.info(
+                f"    [Restore] injected restored summary "
+                f"({len(_restore)} chars) from force_audio asset — "
+                f"marked done, no re-email."
+            )
+            self._schedule_next(next_info)
+            return None
+
         # ── Phase A1.5 — fixed freshness gap.  The school keeps
         # processing recordings for days after class (transcode → audio
         # mix → screenshot job), and until that finishes the CDN serves
