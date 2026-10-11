@@ -273,7 +273,13 @@ def _load_force_audio() -> dict[str, dict]:
                 has_ppt = isinstance(ppt_url, str) and bool(ppt_url)
                 has_video = (isinstance(entry.get("video_url"), str)
                              and bool(entry.get("video_url")))
-                if not has_url and not has_ppt and not has_video:
+                # "summary" = a directly-restored summary (Phase A0), e.g. a
+                # lecture summary recovered from a sent email after a
+                # force-reset wiped the DB copy.  No audio/ppt/video URL.
+                has_summary = (isinstance(entry.get("summary"), str)
+                               and bool(entry.get("summary").strip()))
+                if (not has_url and not has_ppt and not has_video
+                        and not has_summary):
                     continue
                 sid = str(entry.get("sub_id") or name.rsplit(".", 1)[0])
                 out[sid] = entry
