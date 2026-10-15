@@ -329,6 +329,25 @@ def _run_source_diag(client, db, reporter) -> None:
                   f"speech_frac={res['speech_frac']:.0%} "
                   f"am_spread={res.get('am_spread', -1):.2f} "
                   f"ok={res['ok']} err={res['error']}", flush=True)
+            # Stereo anti-phase check (upstream PR #51 hypothesis): a
+            # "0 segments" lecture is either physically silent OR a
+            # stereo track whose channels cancel in the default (L+R)/2
+            # mono mix.  diff_speech_frac > mix_speech_frac with
+            # mix/max_channel < 0.25 proves anti-phase (PR #51's
+            # (L-R) mix would recover the voice).
+            from src.ai.transcriber import probe_stereo_antiphase
+            ap = probe_stereo_antiphase(vpn_url, headers,
+                                        position=0, window_s=90)
+            if ap.get("error"):
+                print(f"  [anti  ] {ap['error']}", flush=True)
+            else:
+                print(f"  [anti  ] mix/max_ch="
+                      f"{ap['mix_over_max_channel']:.3f} "
+                      f"antiphase={ap['antiphase']} "
+                      f"mix_sf={ap['mix_speech_frac']:.0%} "
+                      f"diff_sf={ap['diff_speech_frac']:.0%} "
+                      f"l={ap['l_power']:.5f} r={ap['r_power']:.5f} "
+                      f"diff_pwr={ap['diff_power']:.5f}", flush=True)
         except Exception as e:
             print(f"  [env   ] probe failed: "
                   f"{type(e).__name__}: {str(e)[:90]}", flush=True)
