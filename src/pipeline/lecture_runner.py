@@ -887,7 +887,14 @@ class LectureRunner:
         Returns (transcript, segments), or None on any failure / empty
         result so the caller falls back to the normal video path.
         """
-        url = asset["url"]
+        # A ppt_url-only asset (injected slides, no audio) is valid in
+        # FORCE_AUDIO_MAP but has nothing to download here — slide
+        # injection happens later in _kept_pages.  Without this guard a
+        # force-extract of such a lecture dies on KeyError and takes the
+        # whole run down (664140's state after 2026-10-15).
+        url = asset.get("url")
+        if not url:
+            return None
         path = os.path.join(config.AUDIO_DIR, f"{sub_id}.injected.f32")
         try:
             self._reporter.info(
