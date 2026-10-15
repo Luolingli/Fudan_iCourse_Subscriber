@@ -955,9 +955,15 @@ def probe_audio(url: str, headers: str = "",
         n = len(raw) // BYTES_PER_SAMPLE
         seconds = n / SAMPLE_RATE
         if n < SAMPLE_RATE * 30:
+            # A head window that decoded fine is the truth; a refused
+            # deep seek (server ignores ranges / cuts the stream) must
+            # NOT clobber its verdict — that clobber reported measured
+            # SILENT windows as "inconclusive: 0s decoded at 600s".
+            if best["error"] is None:
+                continue
             best = {**best, "error": (
                 f"only {seconds:.0f}s decoded at {pos}s "
-                f"(seek unsupported / stream cut)"), "position": pos}
+                f"(server refuses this seek position)"), "position": pos}
             continue
         samples = np.frombuffer(raw[:n * BYTES_PER_SAMPLE],
                                 dtype=np.float32)
@@ -1040,7 +1046,13 @@ def probe_stereo_antiphase(url: str, headers: str = "",
                 timeout=420,
             )
             raw = proc.stdout
-            err = proc.stderr.decode(errors="replace").strip()[-220:]
+            # ffmpeg writes the real cause ("Server returned 403…",
+            # invalid data…) BEFORE the signed URL; the old tail slice
+            # returned only URL characters and hid the attribution.
+            err = re.sub(
+                r"https?://\S+", "<url>",
+                proc.stderr.decode(errors="replace"),
+            ).strip()[:220]
         except subprocess.TimeoutExpired:
             err = f"ffmpeg timeout (attempt {attempt})"
         if len(raw) >= SAMPLE_RATE * 30 * BYTES_PER_SAMPLE * 2:

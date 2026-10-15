@@ -322,13 +322,12 @@ def _run_source_diag(client, db, reporter) -> None:
                 print("  [env   ] no video url", flush=True)
                 continue
             vpn_url, headers = client.get_stream_params(urls[0])
-            res = probe_audio(vpn_url, headers, positions=(0,),
-                              window_s=90)
-            print(f"  [env   ] max={res['max']:.5f} "
-                  f"median={res['median']:.5f} "
-                  f"speech_frac={res['speech_frac']:.0%} "
-                  f"am_spread={res.get('am_spread', -1):.2f} "
-                  f"ok={res['ok']} err={res['error']}", flush=True)
+            # The mono envelope probe moved below: it now only runs as a
+            # fallback when the stereo pull itself fails — and the stereo
+            # window's mix view IS the same measurement anyway.  Order
+            # matters: the second full mp4 pull of a lecture gets burst-
+            # refused (run 38713503977: mono [env] decoded, both [anti]
+            # pulls died instantly x2 retries, both lectures).
             # Stereo anti-phase check (upstream PR #51 hypothesis): a
             # "0 segments" lecture is either physically silent OR a
             # stereo track whose channels cancel in the default (L+R)/2
@@ -340,6 +339,13 @@ def _run_source_diag(client, db, reporter) -> None:
                                         position=0, window_s=90)
             if ap.get("error"):
                 print(f"  [anti  ] {ap['error']}", flush=True)
+                res = probe_audio(vpn_url, headers, positions=(0,),
+                                  window_s=90)
+                print(f"  [env   ] max={res['max']:.5f} "
+                      f"median={res['median']:.5f} "
+                      f"speech_frac={res['speech_frac']:.0%} "
+                      f"am_spread={res.get('am_spread', -1):.2f} "
+                      f"ok={res['ok']} err={res['error']}", flush=True)
             else:
                 print(f"  [anti  ] VERDICT: {ap['verdict']}", flush=True)
                 for tag in ("L", "R", "mix", "diff"):
