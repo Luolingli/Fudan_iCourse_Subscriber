@@ -549,7 +549,8 @@ class LectureRunner:
                     f"{meta['error'] or ''}")
             if res["ok"]:
                 self._reporter.info(
-                    f"    [Gate] variant #{i} ({name}) LIVE: "
+                    f"    [Gate] variant #{i} ({name}) LIVE"
+                    f" (via {res.get('view', 'mix')}): "
                     f"speech_frac={res['speech_frac']:.0%} "
                     f"max={res['max']:.4f} median={res['median']:.4f} "
                     f"@{res['position']}s")
@@ -915,7 +916,7 @@ class LectureRunner:
             fake_proc = types.SimpleNamespace(
                 poll=lambda: 0, returncode=0)
             transcript, segments = self._transcriber.transcribe_tail(
-                path, fake_proc, [], timeout=7200)
+                path, fake_proc, [], timeout=7200, channels=1)
             if transcript.strip():
                 self._reporter.info(
                     f"    [Injected audio] OK: "

@@ -507,9 +507,19 @@ class Transcriber:
         timeout: int,
         wait_on_empty_sec: float = 0.0,
         label: str = "stream",
+        input_channels: int = 1,
     ) -> tuple[str, list[dict]]:
-        """Pull PCM f32le mono 16 kHz bytes through a callable, feed VAD/ASR,
-        return ``(transcript, segments)``.
+        """Pull PCM f32le 16 kHz bytes through a callable, feed mono to
+        VAD/ASR, return ``(transcript, segments)``.
+
+        ``input_channels=2`` consumes interleaved STEREO (how lecture audio
+        is downloaded since the anti-phase discovery) and picks ONE view for
+        the whole stream from the head window's modulation: the historical
+        mix (L+R)/√2, or the difference (L−R)/√2 that carries the speech of
+        out-of-phase dual-mic recordings (680013: mix speech_frac 0% vs
+        diff 37%).  Deliberately NOT PR #51's 25%-power rule — measured
+        mix/ch ratios 0.77 and 1.24 prove it never fires when common-mode
+        hum keeps the mix loud.
 
         Args:
             read_fn(n): return up to n bytes; ``b""`` means "no data right now".
@@ -522,7 +532,10 @@ class Transcriber:
             timeout: total seconds before we give up and raise TimeoutError.
             wait_on_empty_sec: poll interval for the tail-f wait branch; set
                 0 for pipe sources (where empty read truly means EOF).
+            input_channels: 1 mono, 2 interleaved stereo.
         """
+        if input_channels not in (1, 2):
+            raise ValueError("PCM input must be mono or stereo")
         self._init()
         self._reset_vad()
         t0 = time.time()
@@ -530,12 +543,47 @@ class Transcriber:
               flush=True)
 
         segments: list[dict] = []
-        total_read = 0      # samples
+        total_read = 0      # mono samples post-conversion
         total_bytes = 0
         last_report = t0
         last_segment_at = 0.0
         silence_marked = False
         rms_frames: list[float] = []   # per-1s RMS, for empty-transcript forensics
+
+        # ── stereo head decision: buffer 45 s, choose mix-vs-diff once ──
+        block_bytes = BYTES_PER_SECOND * input_channels
+        channel_mode = "mix"
+        queued: list = []
+        if input_channels == 2:
+            head_bytes = 45 * BYTES_PER_SECOND * 2
+            head = bytearray()
+            while len(head) < head_bytes:
+                if time.time() - t0 > timeout:
+                    raise TimeoutError(
+                        f"Transcription timed out after {timeout}s")
+                got = read_fn(head_bytes - len(head))
+                if got:
+                    head += got
+                    continue
+                if is_eof_fn():
+                    break
+                time.sleep(wait_on_empty_sec or 0.1)
+            if head:
+                total_bytes += len(head)
+                pairs = np.frombuffer(
+                    bytes(head[: len(head) // 8 * 8]),
+                    dtype=np.float32).reshape(-1, 2)
+                if len(pairs):
+                    channel_mode = _stereo_channel_mode(pairs)
+                    mono = ((pairs[:, 0] + pairs[:, 1])
+                            if channel_mode == "mix"
+                            else (pairs[:, 0] - pairs[:, 1])
+                            ) * np.float32(2 ** -0.5)
+                    print(f"[Transcriber] stereo mode={channel_mode} "
+                          f"(decided on {len(pairs) / SAMPLE_RATE:.0f}s "
+                          f"head)", flush=True)
+                    queued = [mono[i:i + SAMPLE_RATE]
+                              for i in range(0, len(mono), SAMPLE_RATE)]
 
         while True:
             now = time.time()
@@ -544,16 +592,30 @@ class Transcriber:
                     f"Transcription timed out after {timeout}s"
                 )
 
-            raw = read_fn(BYTES_PER_SECOND)
-            if not raw:
-                if is_eof_fn():
-                    break
-                if wait_on_empty_sec > 0:
-                    time.sleep(wait_on_empty_sec)
-                continue
+            if queued:
+                samples = queued.pop(0)
+            else:
+                raw = read_fn(block_bytes)
+                if not raw:
+                    if is_eof_fn():
+                        break
+                    if wait_on_empty_sec > 0:
+                        time.sleep(wait_on_empty_sec)
+                    continue
 
-            total_bytes += len(raw)
-            samples = np.frombuffer(raw, dtype=np.float32)
+                total_bytes += len(raw)
+                if input_channels == 2:
+                    usable = len(raw) // 8 * 8
+                    if usable == 0:
+                        continue
+                    pairs = np.frombuffer(raw[:usable],
+                                          dtype=np.float32).reshape(-1, 2)
+                    samples = ((pairs[:, 0] + pairs[:, 1])
+                               if channel_mode == "mix"
+                               else (pairs[:, 0] - pairs[:, 1])
+                               ) * np.float32(2 ** -0.5)
+                else:
+                    samples = np.frombuffer(raw, dtype=np.float32)
             total_read += len(samples)
             rms_frames.append(float(np.sqrt(np.mean(samples * samples))))
             audio_pos = total_read / SAMPLE_RATE
@@ -746,15 +808,18 @@ class Transcriber:
                         ffmpeg_proc: subprocess.Popen,
                         stderr_chunks: list[bytes],
                         timeout: int = 7200,
+                        channels: int = 2,
                         ) -> tuple[str, list[dict]]:
         """Read PCM samples from a disk file that ffmpeg is *concurrently* writing.
 
         Args:
-            audio_path: Path of the f32le mono 16 kHz file ffmpeg writes to.
+            audio_path: Path of the f32le 16 kHz file ffmpeg writes to.
             ffmpeg_proc: The Popen handle for the ffmpeg process so we can
                 know when "no more data ever".  Owned by the caller (Scheduler).
             stderr_chunks: List that the caller's stderr-drain thread appends to.
             timeout: Total seconds before giving up.
+            channels: 2 (default) = interleaved stereo with head-based
+                mix/diff selection; 1 = raw mono asset (injected audio).
 
         Returns:
             ``(transcript, segments)``.
@@ -800,6 +865,7 @@ class Transcriber:
                 timeout=timeout,
                 wait_on_empty_sec=0.1,
                 label="tail",
+                input_channels=channels,
             )
             # ffmpeg can exit 0 on a server-side truncated stream; without
             # this check the partial transcript would silently pass as a
@@ -830,7 +896,7 @@ class Transcriber:
             "-reconnect_delay_max", "5",
             "-i", url,
             "-vn",
-            "-ar", str(SAMPLE_RATE), "-ac", "1",
+            "-ar", str(SAMPLE_RATE), "-ac", "2",
             "-f", "f32le", "-",
         ]
         return self._transcribe_with_inline_ffmpeg(cmd, timeout=timeout)
@@ -839,7 +905,7 @@ class Transcriber:
         """Transcribe a local mp4 file via ffmpeg-to-pipe."""
         cmd = [
             "ffmpeg", "-i", video_path,
-            "-ar", str(SAMPLE_RATE), "-ac", "1",
+            "-ar", str(SAMPLE_RATE), "-ac", "2",
             "-f", "f32le", "-",
         ]
         return self._transcribe_with_inline_ffmpeg(cmd)
@@ -873,6 +939,7 @@ class Transcriber:
                 timeout=timeout,
                 wait_on_empty_sec=0,
                 label="pipe",
+                input_channels=2,
             )
         finally:
             if proc.poll() is None:
@@ -916,6 +983,14 @@ def probe_audio(url: str, headers: str = "",
     distinguishes a real recording from a pre-release placeholder (dead /
     flat-noise track) WITHOUT downloading the lecture or loading ASR.
 
+    Fetches STEREO and measures two views from the same bytes: the mix
+    (L+R)/√2 — what mono ASR always saw — and the difference (L−R)/√2,
+    which carries an anti-phase dual-mic room's speech (680013/669978,
+    2026-10-15: mix dead flat, diff 37% modulated).  "live" = either
+    view modulates, so anti-phase rooms reach ASR instead of being
+    parked in waiting_audio; _consume_pcm_stream redoes the same pick
+    over the full file.
+
     Tries each ``positions`` seek point in order (head first: plain
     streaming works through proxies that ignore range requests), stops at
     the first window showing speech-like content.  A window is "live" when
@@ -940,7 +1015,7 @@ def probe_audio(url: str, headers: str = "",
                     "-reconnect_on_http_error", "4xx,5xx"]
         cmd += ["-ss", str(pos), "-i", url,
                 "-t", str(window_s),
-                "-vn", "-ar", str(SAMPLE_RATE), "-ac", "1",
+                "-vn", "-ar", str(SAMPLE_RATE), "-ac", "2",
                 "-f", "f32le", "-"]
         try:
             proc = subprocess.run(
@@ -952,9 +1027,9 @@ def probe_audio(url: str, headers: str = "",
                     "position": pos}
             continue
         raw = proc.stdout
-        n = len(raw) // BYTES_PER_SAMPLE
-        seconds = n / SAMPLE_RATE
-        if n < SAMPLE_RATE * 30:
+        n2 = len(raw) // (BYTES_PER_SAMPLE * 2)
+        seconds = n2 / SAMPLE_RATE
+        if n2 < SAMPLE_RATE * 30:
             # A head window that decoded fine is the truth; a refused
             # deep seek (server ignores ranges / cuts the stream) must
             # NOT clobber its verdict — that clobber reported measured
@@ -965,26 +1040,31 @@ def probe_audio(url: str, headers: str = "",
                 f"only {seconds:.0f}s decoded at {pos}s "
                 f"(server refuses this seek position)"), "position": pos}
             continue
-        samples = np.frombuffer(raw[:n * BYTES_PER_SAMPLE],
-                                dtype=np.float32)
-        win = SAMPLE_RATE
-        nf = n // win
-        env = np.sqrt(
-            (samples[: nf * win].reshape(nf, win) ** 2).mean(axis=1)
-        )
-        mx, med = float(env.max()), float(np.median(env))
-        floor = float(np.percentile(env, 20))
-        speech_frac = float(np.mean(env > max(3 * floor, 1e-4)))
-        # am_spread: inter-quartile envelope spread / median — syllable
-        # modulation lives around >=0.35 for speech, ~0.05 for steady
-        # electrical hum, however loud.
-        iqr = (float(np.percentile(env, 75))
-               - float(np.percentile(env, 25)))
+        pairs = np.frombuffer(raw[:n2 * 2 * BYTES_PER_SAMPLE],
+                              dtype=np.float32).reshape(-1, 2)
+        inv = np.float32(2 ** -0.5)
+        st_mix = _env_stats((pairs[:, 0] + pairs[:, 1]) * inv)
+        st_diff = _env_stats((pairs[:, 0] - pairs[:, 1]) * inv)
+
+        def _live(s):
+            return (s["speech_frac"] >= 0.03
+                    or (s["median"] > 1e-4
+                        and s["max"] / max(s["median"], 1e-9) >= 2.5))
+
+        live_mix, live_diff = _live(st_mix), _live(st_diff)
+        # The differential view only wins when the mix is flat — an
+        # anti-phase room's speech lives there while the mix keeps just
+        # the common-mode hum (680013: mix 0% / diff 37%).
+        chosen, view = ((st_diff, "diff")
+                        if live_diff and not live_mix else (st_mix, "mix"))
         verdict = {
-            "ok": speech_frac >= 0.03 or (med > 1e-4 and mx / med >= 2.5),
-            "seconds": seconds, "max": mx, "median": med,
-            "speech_frac": speech_frac, "position": pos, "error": None,
-            "am_spread": iqr / max(med, 1e-6),
+            "ok": live_mix or live_diff,
+            "seconds": seconds, "max": chosen["max"],
+            "median": chosen["median"],
+            "speech_frac": chosen["speech_frac"],
+            "position": pos, "error": None,
+            "am_spread": chosen["am_spread"], "view": view,
+            "diff_speech_frac": st_diff["speech_frac"],
         }
         best = verdict
         if verdict["ok"]:
@@ -1006,6 +1086,36 @@ def _env_stats(x):
     return {"frames": nf, "max": float(env.max()), "median": med,
             "speech_frac": float(np.mean(env > max(3 * floor, 1e-4))),
             "am_spread": iqr / max(med, 1e-9)}
+
+
+def _stereo_channel_mode(stereo) -> str:
+    """Pick the mono view for an interleaved-stereo lecture stream: "mix"
+    ((L+R)/√2 — exactly what ffmpeg -ac 1 always produced) or "diff"
+    ((L−R)/√2, the differential voice of an anti-phase dual-mic room).
+
+    Decides on MODULATION, not level: measured 680013/669978 show mix
+    speech_frac 0% (constant hum floor survives the mix, speech cancels
+    out of phase) while diff shows 37%/10% — and PR #51's 25%-power rule
+    returns False on both files (mix/ch 0.77/1.24), because the common-mode
+    hum keeps the mix loud.  Ties, short or dead heads fall back to "mix"
+    (historic behaviour)."""
+    if stereo is None or len(stereo) < 3 * SAMPLE_RATE:
+        return "mix"
+    inv = np.float32(2 ** -0.5)
+    mix = (stereo[:, 0] + stereo[:, 1]) * inv
+    dif = (stereo[:, 0] - stereo[:, 1]) * inv
+    mix_p = float(np.mean(mix * mix))
+    ch_p = max(float(np.mean(stereo[:, 0] * stereo[:, 0])),
+               float(np.mean(stereo[:, 1] * stereo[:, 1])))
+    if ch_p > 1e-8 and mix_p < 0.25 * ch_p:
+        return "diff"                      # PR #51 pure-cancellation case
+    st_mix = _env_stats(mix)
+    if st_mix["speech_frac"] >= 0.03:
+        return "mix"                       # healthy: voice survives the mix
+    st_diff = _env_stats(dif)
+    if st_diff["speech_frac"] >= 0.03 or st_diff["am_spread"] >= 0.3:
+        return "diff"
+    return "mix"
 
 
 def probe_stereo_antiphase(url: str, headers: str = "",
