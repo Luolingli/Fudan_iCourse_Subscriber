@@ -524,6 +524,8 @@ class LectureRunner:
             return None, True
         if not candidates:
             return None, True  # the no_video path in _get_transcript decides
+        inconclusive = 0
+        silent = 0
         for i, url in enumerate(candidates[:6]):
             try:
                 vpn_url, headers = self._client.get_stream_params(url)
@@ -532,6 +534,7 @@ class LectureRunner:
                 self._reporter.info(
                     f"    [Gate] probe #{i} error: "
                     f"{type(e).__name__}: {e}")
+                inconclusive += 1
                 continue
             name = url.split("?", 1)[0].rsplit("/", 1)[-1][:28]
             if i < 2:
@@ -555,11 +558,26 @@ class LectureRunner:
                 self._reporter.info(
                     f"    [Gate] variant #{i} ({name}) inconclusive: "
                     f"{res['error']}")
+                inconclusive += 1
             else:
                 self._reporter.info(
                     f"    [Gate] variant #{i} ({name}) SILENT: "
                     f"max={res['max']:.4f}≈median={res['median']:.4f} "
                     f"speech_frac={res['speech_frac']:.0%}")
+                silent += 1
+        # All probed variants INCONCLUSIVE (play stream unfetchable, e.g.
+        # WebVPN 403) is a transport failure, NOT a "silent track pending
+        # mix".  Holding those lectures soft-waiting for AUDIO_GATE_MAX_DAYS
+        # just spins idle while the PPT feed (the reliable content source)
+        # sits unused.  Proceed so the PPT/board fallback can recover the
+        # lecture now; a truly silent track (probed fine, no speech) still
+        # waits below for the platform mix to land.
+        if inconclusive and silent == 0:
+            self._reporter.info(
+                "    [Gate] all variants inconclusive (play stream "
+                "unfetchable) — proceeding to PPT/board fallback "
+                "(not soft-holding).")
+            return None, True
         age = _lecture_age_days(date)
         if age is None or age >= config.AUDIO_GATE_MAX_DAYS:
             self._reporter.info(

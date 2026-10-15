@@ -986,6 +986,82 @@ def probe_audio(url: str, headers: str = "",
     return best
 
 
+def probe_stereo_antiphase(url: str, headers: str = "",
+                           position: int = 0, window_s: int = 90) -> dict:
+    """Fetch a window of the RAW stereo (not the mono downmix) and test
+    whether the two channels are ANTI-PHASE — i.e. the default (L+R)/2
+    mono mix cancels the voice.  Diagnostic for the "反相立体声抵消人声"
+    hypothesis (upstream PR #51): a lecture that decodes fine but
+    transcribes to 0 segments may be a physically-silent track OR a
+    stereo track whose channels are inverted (the mono mix kills speech).
+
+    Returns the mix-vs-strongest-channel power ratio, the flag
+    ``antiphase`` (mix loses >6 dB / 25% vs the stronger channel), and
+    the speech_frac of BOTH the default mix and the difference mix
+    (L-R)/sqrt(2), which recovers the voice when the channels are
+    anti-phase.  A healthy stereo/mono/one-sided track keeps a high
+    mix_over_max_channel and the difference mix adds nothing.
+    """
+    cmd = ["ffmpeg", "-v", "error"]
+    if headers:
+        cmd += ["-headers", headers]
+    if url.startswith(("http://", "https://")):
+        cmd += ["-reconnect", "1", "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "10",
+                "-reconnect_on_network_error", "1",
+                "-reconnect_on_http_error", "4xx,5xx"]
+    cmd += ["-ss", str(position), "-i", url,
+            "-t", str(window_s),
+            "-vn", "-ar", str(SAMPLE_RATE), "-ac", "2",
+            "-f", "f32le", "-"]
+    try:
+        proc = subprocess.run(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=420,
+        )
+    except subprocess.TimeoutExpired:
+        return {"position": position,
+                "error": f"ffmpeg timeout at {position}s"}
+    raw = proc.stdout
+    n2 = len(raw) // (BYTES_PER_SAMPLE * 2)
+    seconds = n2 / SAMPLE_RATE
+    if n2 < SAMPLE_RATE * 30:
+        return {"position": position, "error": (
+            f"only {seconds:.0f}s decoded at {position}s "
+            f"(seek unsupported / stream cut)")}
+    stereo = np.frombuffer(raw[:n2 * 2 * BYTES_PER_SAMPLE],
+                           dtype=np.float32).reshape(-1, 2)
+    left, right = stereo[:, 0], stereo[:, 1]
+    inv = np.float32(2 ** -0.5)
+    mix = (left + right) * inv       # default ffmpeg mono downmix
+    diff = (left - right) * inv      # anti-phase recovery
+    l_pwr = float(np.mean(left * left))
+    r_pwr = float(np.mean(right * right))
+    mix_pwr = float(np.mean(mix * mix))
+    diff_pwr = float(np.mean(diff * diff))
+    max_ch = max(l_pwr, r_pwr)
+
+    def _speech_frac(x):
+        nf = len(x) // SAMPLE_RATE
+        if nf < 1:
+            return 0.0
+        env = np.sqrt((x[:nf * SAMPLE_RATE].reshape(
+            nf, SAMPLE_RATE) ** 2).mean(axis=1))
+        floor = float(np.percentile(env, 20))
+        return float(np.mean(env > max(3 * floor, 1e-4)))
+
+    return {
+        "position": position, "seconds": seconds,
+        "l_power": l_pwr, "r_power": r_pwr,
+        "mix_power": mix_pwr, "diff_power": diff_pwr,
+        "mix_over_max_channel": mix_pwr / max_ch if max_ch > 1e-12 else 0.0,
+        "antiphase": bool(max_ch > 1e-8 and mix_pwr < 0.25 * max_ch),
+        "mix_speech_frac": _speech_frac(mix),
+        "diff_speech_frac": _speech_frac(diff),
+        "error": None,
+    }
+
+
 def stream_format_meta(url: str, headers: str = "") -> dict:
     """ffprobe a (streaming) URL and return the MEDIA-stack view of the
     object: duration + server-declared total size.  Pairing this with the
