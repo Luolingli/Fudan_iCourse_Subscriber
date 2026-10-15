@@ -527,11 +527,16 @@ document.addEventListener("alpine:init", () => {
     formatPptTimestamp(sec) { return _formatTimestamp(sec); },
 
     getExportableLectures() {
-      return (this.lectures || []).filter((lec) => lec.summary && lec.summary.trim());
+      // A full transcript without a summary is still a deliverable — the
+      // transcript is what gets studied for exams.
+      return (this.lectures || []).filter(function (lec) {
+        return (lec.summary && lec.summary.trim())
+            || (lec.transcript && lec.transcript.trim());
+      });
     },
     openExportDialog() {
       const list = this.getExportableLectures();
-      if (!list.length) { this._toast("No summarized lectures to export", "error"); return; }
+      if (!list.length) { this._toast("无可导出的课次", "error"); return; }
       this.exportSelection = {};
       list.forEach((lec) => { this.exportSelection[lec.sub_id] = true; });
       this.exportDialogOpen = true;
@@ -613,6 +618,12 @@ document.addEventListener("alpine:init", () => {
           lines.push("### 摘要");
           lines.push("");
           lines.push(lec.summary);
+          lines.push("");
+        }
+        if (lec.transcript) {
+          lines.push("### 转录全文");
+          lines.push("");
+          lines.push(lec.transcript);
           lines.push("");
         }
         lines.push("---");
