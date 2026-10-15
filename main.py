@@ -341,13 +341,17 @@ def _run_source_diag(client, db, reporter) -> None:
             if ap.get("error"):
                 print(f"  [anti  ] {ap['error']}", flush=True)
             else:
-                print(f"  [anti  ] mix/max_ch="
-                      f"{ap['mix_over_max_channel']:.3f} "
-                      f"antiphase={ap['antiphase']} "
-                      f"mix_sf={ap['mix_speech_frac']:.0%} "
-                      f"diff_sf={ap['diff_speech_frac']:.0%} "
-                      f"l={ap['l_power']:.5f} r={ap['r_power']:.5f} "
-                      f"diff_pwr={ap['diff_power']:.5f}", flush=True)
+                print(f"  [anti  ] VERDICT: {ap['verdict']}", flush=True)
+                for tag in ("L", "R", "mix", "diff"):
+                    s = ap[tag]
+                    print(f"  [anti  ]   {tag:>4}: sf={s['speech_frac']:.0%} "
+                          f"am={s['am_spread']:.2f} mx={s['max']:.4f} "
+                          f"md={s['median']:.4f}", flush=True)
+                print(f"  [anti  ]   mix/ch={ap['mix_over_max_channel']:.2f} "
+                      f"pwr-rule(PR51)={ap['antiphase']} "
+                      f"lp={ap['l_power']:.5f} rp={ap['r_power']:.5f} "
+                      f"mixp={ap['mix_power']:.5f} "
+                      f"diffp={ap['diff_power']:.5f}", flush=True)
         except Exception as e:
             print(f"  [env   ] probe failed: "
                   f"{type(e).__name__}: {str(e)[:90]}", flush=True)

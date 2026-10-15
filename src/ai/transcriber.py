@@ -986,21 +986,38 @@ def probe_audio(url: str, headers: str = "",
     return best
 
 
-def probe_stereo_antiphase(url: str, headers: str = "",
-                           position: int = 0, window_s: int = 90) -> dict:
-    """Fetch a window of the RAW stereo (not the mono downmix) and test
-    whether the two channels are ANTI-PHASE — i.e. the default (L+R)/2
-    mono mix cancels the voice.  Diagnostic for the "反相立体声抵消人声"
-    hypothesis (upstream PR #51): a lecture that decodes fine but
-    transcribes to 0 segments may be a physically-silent track OR a
-    stereo track whose channels are inverted (the mono mix kills speech).
+def _env_stats(x):
+    """1 s RMS-envelope stats of a 16 kHz float32 mono view."""
+    nf = len(x) // SAMPLE_RATE
+    if nf < 3:
+        return {"frames": nf, "max": 0.0, "median": 0.0,
+                "speech_frac": 0.0, "am_spread": 0.0}
+    env = np.sqrt((x[:nf * SAMPLE_RATE].reshape(
+        nf, SAMPLE_RATE) ** 2).mean(axis=1))
+    floor = float(np.percentile(env, 20))
+    med = float(np.median(env))
+    iqr = float(np.percentile(env, 75)) - float(np.percentile(env, 25))
+    return {"frames": nf, "max": float(env.max()), "median": med,
+            "speech_frac": float(np.mean(env > max(3 * floor, 1e-4))),
+            "am_spread": iqr / max(med, 1e-9)}
 
-    Returns the mix-vs-strongest-channel power ratio, the flag
-    ``antiphase`` (mix loses >6 dB / 25% vs the stronger channel), and
-    the speech_frac of BOTH the default mix and the difference mix
-    (L-R)/sqrt(2), which recovers the voice when the channels are
-    anti-phase.  A healthy stereo/mono/one-sided track keeps a high
-    mix_over_max_channel and the difference mix adds nothing.
+
+def probe_stereo_antiphase(url: str, headers: str = "",
+                           position: int = 0, window_s: int = 90,
+                           retries: int = 2,
+                           retry_wait_s: int = 25) -> dict:
+    """Fetch a window of the RAW stereo and decide between PHYSICAL silence
+    and PR #51 anti-phase cancellation — the two are indistinguishable on
+    any mono view, because a (L=-R) voice recording downmixes to a flat
+    constant floor while the browser (playing each channel) sounds normal.
+
+    Measures envelope modulation of ALL FOUR views (L, R, mix=(L+R)/√2,
+    diff=(L−R)/√2): speech modulation that lives in the channels/diff but
+    dies in the mix proves cancellation and tells which recovery the
+    ASR must use.  Consecutive WebVPN pulls can draw burst-refusal
+    second-failures, so short decodes retry after a pause and ffmpeg's
+    stderr tail is returned on failure — the old blind "0s decoded"
+    gave no attribution.
     """
     cmd = ["ffmpeg", "-v", "error"]
     if headers:
@@ -1014,62 +1031,65 @@ def probe_stereo_antiphase(url: str, headers: str = "",
             "-t", str(window_s),
             "-vn", "-ar", str(SAMPLE_RATE), "-ac", "2",
             "-f", "f32le", "-"]
-    try:
-        proc = subprocess.run(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=420,
-        )
-    except subprocess.TimeoutExpired:
-        return {"position": position,
-                "error": f"ffmpeg timeout at {position}s"}
-    raw = proc.stdout
+    raw = b""
+    err = ""
+    for attempt in range(1, retries + 1):
+        try:
+            proc = subprocess.run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=420,
+            )
+            raw = proc.stdout
+            err = proc.stderr.decode(errors="replace").strip()[-220:]
+        except subprocess.TimeoutExpired:
+            err = f"ffmpeg timeout (attempt {attempt})"
+        if len(raw) >= SAMPLE_RATE * 30 * BYTES_PER_SAMPLE * 2:
+            break
+        if attempt < retries:
+            raw = b""
+            time.sleep(retry_wait_s)
     n2 = len(raw) // (BYTES_PER_SAMPLE * 2)
     seconds = n2 / SAMPLE_RATE
     if n2 < SAMPLE_RATE * 30:
-        return {"position": position, "error": (
-            f"only {seconds:.0f}s decoded at {position}s "
-            f"(seek unsupported / stream cut)")}
+        return {"error": f"only {seconds:.0f}s decoded x{retries}: {err}"}
     stereo = np.frombuffer(raw[:n2 * 2 * BYTES_PER_SAMPLE],
                            dtype=np.float32).reshape(-1, 2)
     left, right = stereo[:, 0], stereo[:, 1]
     inv = np.float32(2 ** -0.5)
     mix = (left + right) * inv       # default ffmpeg mono downmix
-    diff = (left - right) * inv      # anti-phase recovery
+    diff = (left - right) * inv      # differential-mode recovery
     l_pwr = float(np.mean(left * left))
     r_pwr = float(np.mean(right * right))
     mix_pwr = float(np.mean(mix * mix))
     diff_pwr = float(np.mean(diff * diff))
     max_ch = max(l_pwr, r_pwr)
+    st_l, st_r = _env_stats(left), _env_stats(right)
+    st_mix, st_diff = _env_stats(mix), _env_stats(diff)
 
-    def _speech_frac(x):
-        nf = len(x) // SAMPLE_RATE
-        if nf < 1:
-            return 0.0
-        env = np.sqrt((x[:nf * SAMPLE_RATE].reshape(
-            nf, SAMPLE_RATE) ** 2).mean(axis=1))
-        floor = float(np.percentile(env, 20))
-        return float(np.mean(env > max(3 * floor, 1e-4)))
-
+    SF = 0.03          # speech-like modulation floor
+    chan_sf = max(st_l["speech_frac"], st_r["speech_frac"])
+    if max(st_mix["speech_frac"], st_diff["speech_frac"], chan_sf) < SF:
+        verdict = "no modulation anywhere — physical-silence signature"
+    elif st_diff["speech_frac"] >= SF and st_diff["speech_frac"] > st_mix["speech_frac"]:
+        verdict = "ANTI-PHASE — diff (L-R) carries speech the mono mix kills"
+    elif chan_sf >= SF and chan_sf > st_mix["speech_frac"]:
+        verdict = "ANTI-PHASE — channels modulate while the mono mix stays flat"
+    else:
+        verdict = "mix shows modulation — mono ASR should NOT be empty (VAD/ASR issue)"
     return {
         "position": position, "seconds": seconds,
+        "verdict": verdict,
+        "L": st_l, "R": st_r, "mix": st_mix, "diff": st_diff,
         "l_power": l_pwr, "r_power": r_pwr,
         "mix_power": mix_pwr, "diff_power": diff_pwr,
         "mix_over_max_channel": mix_pwr / max_ch if max_ch > 1e-12 else 0.0,
         "antiphase": bool(max_ch > 1e-8 and mix_pwr < 0.25 * max_ch),
-        "mix_speech_frac": _speech_frac(mix),
-        "diff_speech_frac": _speech_frac(diff),
+        "ok": verdict.startswith("ANTI-PHASE") or verdict.startswith("mix shows"),
         "error": None,
     }
 
 
 def stream_format_meta(url: str, headers: str = "") -> dict:
-    """ffprobe a (streaming) URL and return the MEDIA-stack view of the
-    object: duration + server-declared total size.  Pairing this with the
-    requests-stack view (ICourseClient.probe_video_sources) in the same run
-    shows whether ffmpeg-over-WebVPN and requests-over-WebVPN are being
-    served the SAME physical file (equal size) or different objects
-    (silent proxy vs real recording) — the identity question, one line.
-    """
     import json
     cmd = ["ffprobe", "-v", "error"]
     if headers:
