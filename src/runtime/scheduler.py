@@ -142,6 +142,12 @@ class _PendingSpawn:
     the spawn thread detect that its entry was ``release()``-d (or replaced)
     in the meantime and abort instead of resurrecting a zombie entry."""
 
+    def __init__(self):
+        # Upstream PR #50: a failed spawn records the cause here so waiters
+        # distinguish "URL query / Popen blew up transiently (retry me)"
+        # from "this lecture genuinely has no playable video".
+        self.error: RuntimeError | None = None
+
 
 class AudioDownloader:
     """Spawn-and-track concurrent ``ffmpeg`` audio extractions.
@@ -304,10 +310,17 @@ class AudioDownloader:
                     target=self._monitor, args=(handle,),
                     name=f"audio-monitor-{sub_id}", daemon=True,
                 ).start()
-            except Exception:
-                self._pop_if_mine(sub_id, pending)
+            except Exception as e:
+                # Keep the token and record the cause (PR #50): popping it
+                # made get() return None, so a transient lookup failure was
+                # mis-labelled "no_video" downstream.
+                error = RuntimeError(
+                    f"Audio prefetch for {sub_id} failed ({type(e).__name__})")
+                with self._lock:
+                    if self._active.get(sub_id) is pending:
+                        pending.error = error
                 self._sem.release()
-                raise
+                raise error from None
         except Exception as e:
             if self._reporter:
                 self._reporter.audio_prefetch_failed(sub_id, e)
@@ -331,6 +344,11 @@ class AudioDownloader:
                     return None
                 if isinstance(entry, AudioHandle):
                     return entry
+                if entry.error is not None:
+                    # consume the failed token so a later schedule re-arms
+                    if self._active.get(sub_id) is entry:
+                        self._active.pop(sub_id, None)
+                    raise entry.error
             if time.time() > deadline:
                 raise TimeoutError(
                     f"audio download for {sub_id} did not start within "

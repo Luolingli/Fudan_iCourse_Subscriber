@@ -43,6 +43,7 @@ import os
 import shutil
 import time
 import types
+from collections import Counter
 from typing import TYPE_CHECKING, Optional
 from urllib.parse import urlparse
 from urllib.request import urlopen
@@ -666,8 +667,18 @@ class LectureRunner:
         """
         if not segments:
             return False
-        if not any((s.get("text") or "").strip() for s in segments):
+        # Upstream PR #49, on top of the density floor below: a caption
+        # track that is PURE PUNCTUATION normalises to nothing, and filler
+        # spam ("的。"×287) is one token repeated across ≥90% of segments.
+        # Normalise to alphanumerics first so punctuation can't pad density.
+        norm = ["".join(c for c in (s.get("text") or "") if c.isalnum())
+                for s in segments]
+        if not any(norm):
             return False
+        if len(norm) >= 20:
+            top, count = Counter(norm).most_common(1)[0]
+            if len(top) <= 1 and count / len(norm) >= 0.9:
+                return False
         span_s = max(int(segments[-1].get("end_ms", 0)) // 1000,
                      int(duration_hint_s or 0))
         if span_s > 0:
@@ -775,9 +786,13 @@ class LectureRunner:
                             url=chosen_video)
         try:
             handle = downloader.get(sub_id, timeout=120)
-        except TimeoutError as e:
+        except (TimeoutError, RuntimeError) as e:
+            # RuntimeError = spawn recorded a lookup/startup failure
+            # (upstream PR #50) — retryable transcribe error, never the
+            # gray "no video" verdict.  Release clears any leftover token.
             self._reporter.info(f"    [SKIP] {e}")
             self._db.update_error(sub_id, "transcribe", str(e))
+            self._release_audio(sub_id)
             return None, None
         if handle is None:
             # AudioDownloader returns None when get_video_url() returned
@@ -797,9 +812,12 @@ class LectureRunner:
                 handle.path, handle.process, handle.stderr_chunks,
             )
         except NoAudioStreamError as e:
+            # Upstream PR #48: do NOT mark_processed — a video-only MP4 is
+            # usually a broken school upload that later gets replaced;
+            # keeping the retriable error lets it recover, and the
+            # abandoned/error-cap filter already bounds the retries.
             self._reporter.info(f"    [SKIP] Video-only (no audio stream): {e}")
             self._db.update_error(sub_id, "transcribe", str(e))
-            self._db.mark_processed(sub_id)
             self._release_audio(sub_id)
             return None, None
         except IncompleteAudioError as e:
@@ -851,7 +869,11 @@ class LectureRunner:
             transcript, segments = self._retry_alternate_videos(
                 sub_id, course_id, handle, transcript, segments)
 
-        self._db.update_transcript(sub_id, transcript)
+        if transcript.strip():
+            # Don't persist an empty transcript (upstream PR #48): the
+            # additive merge treats a non-NULL local "" as authoritative
+            # and would poison a good remote copy.
+            self._db.update_transcript(sub_id, transcript)
         return transcript, segments
 
     def _transcribe_injected_audio(self, sub_id: str,
@@ -1003,7 +1025,7 @@ class LectureRunner:
             downloader.schedule(self._client, course_id, sub_id, url=alt)
             try:
                 alt_handle = downloader.get(sub_id, timeout=120)
-            except TimeoutError as e:
+            except (TimeoutError, RuntimeError) as e:
                 self._reporter.info(f"    [Alt video] {e}")
                 return transcript, segments
             if alt_handle is None:

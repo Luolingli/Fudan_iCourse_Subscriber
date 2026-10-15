@@ -595,9 +595,11 @@ class ICourseClient:
         path) so a caller that transcribes zero speech can fall back to
         the next variant.  Returns [] when no source yields a URL.
         """
+        lookup_errors: list[str] = []
         try:
             info = self.get_sub_info(course_id, sub_id)
         except Exception as e:
+            lookup_errors.append(f"sub-info: {type(e).__name__}")
             print(f"    sub-info unavailable for {sub_id} "
                   f"({type(e).__name__}); falling back to sub-detail")
             info = {}
@@ -626,7 +628,10 @@ class ICourseClient:
             for k, v in video_list.items():
                 if isinstance(v, dict):
                     preview = v.get("preview_url")
-                    if preview and preview.endswith(".mp4"):
+                    # Path-based test (upstream PR #47): playback/signed URLs
+                    # legitimately carry a ?query tail — bare str.endswith
+                    # silently dropped every one of them.
+                    if preview and urlparse(preview).path.endswith(".mp4"):
                         _add(preview, f"video_list[{k}]")
 
         # then playurl (has /0/ prefix, may need stripping)
@@ -635,14 +640,14 @@ class ICourseClient:
             for k, v in playurl.items():
                 if k == "now":
                     continue
-                if isinstance(v, str) and v.endswith(".mp4"):
+                if isinstance(v, str) and urlparse(v).path.endswith(".mp4"):
                     _add(v, f"playurl[{k}]")
 
         # Review-gate fallback: nested content.playback.url is preserved
         # even when code == 7001 scrubs the top-level fields above.
         playback = (info.get("content") or {}).get("playback") or {}
         nested = playback.get("url")
-        if isinstance(nested, str) and nested.endswith(".mp4"):
+        if isinstance(nested, str) and urlparse(nested).path.endswith(".mp4"):
             _add(nested, "content.playback")
             if not now:
                 content_now = (info.get("content") or {}).get("now")
@@ -657,10 +662,17 @@ class ICourseClient:
                 playback = content.get("playback", {})
                 if playback and playback.get("url"):
                     _add(playback["url"], "sub_detail")
-            except Exception:
-                pass
+            except Exception as e:
+                lookup_errors.append(f"sub-detail: {type(e).__name__}")
 
         if not base_urls:
+            if lookup_errors:
+                # Upstream PR #50: both lookups ERRORED (transient WebVPN
+                # refusal / bad JSON) — that is not "the lecture has no
+                # video".  Raise so callers record a retryable error
+                # instead of mis-labelling the lecture gray "no_video".
+                raise RuntimeError("Playback lookup failed ("
+                                   + "; ".join(lookup_errors) + ")")
             print(f"    No video URL found for {sub_id} (tried video_list, "
                   f"playurl, content.playback, sub_detail)")
             return []
