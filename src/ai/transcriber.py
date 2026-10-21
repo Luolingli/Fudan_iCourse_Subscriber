@@ -1098,22 +1098,43 @@ def _stereo_channel_mode(stereo) -> str:
     out of phase) while diff shows 37%/10% — and PR #51's 25%-power rule
     returns False on both files (mix/ch 0.77/1.24), because the common-mode
     hum keeps the mix loud.  Ties, short or dead heads fall back to "mix"
-    (historic behaviour)."""
+    (historic behaviour).
+
+    MODULATION IS DECIDED FIRST, the power ratio only breaks ties.  The
+    power rule alone picks the wrong view whenever the speech is CENTERED
+    and some anti-phase side signal is loud: L = s + n, R = s − n gives
+    mix = 2s (voice intact) yet mix/ch < 0.25 once |n| > ~7|s|, so a
+    power-first order would switch to diff = 2n — pure noise — and hand
+    ASR a silent lecture (upstream PR #51 Codex review P2, reproduced
+    synthetically).  Modulation answers the only question that matters
+    ("which view actually carries the syllables?") in both directions;
+    the power shortcut is a last resort for view pairs whose modulation
+    is ambiguous.
+    """
     if stereo is None or len(stereo) < 3 * SAMPLE_RATE:
         return "mix"
     inv = np.float32(2 ** -0.5)
     mix = (stereo[:, 0] + stereo[:, 1]) * inv
     dif = (stereo[:, 0] - stereo[:, 1]) * inv
+    st_mix = _env_stats(mix)
+    st_diff = _env_stats(dif)
+
+    def alive(st: dict) -> bool:
+        return st["speech_frac"] >= 0.03 or st["am_spread"] >= 0.3
+
+    mix_alive, diff_alive = alive(st_mix), alive(st_diff)
+    if mix_alive and not diff_alive:
+        return "mix"                       # healthy: voice survives the mix
+    if diff_alive and not mix_alive:
+        return "diff"                      # anti-phase room: voice in L−R
+    if mix_alive:
+        return "mix"                       # both modulated → historic view
+    # Neither view modulates: fall back to the PR #51 power test, which
+    # only ever fires when the mix cancels the channels almost entirely.
     mix_p = float(np.mean(mix * mix))
     ch_p = max(float(np.mean(stereo[:, 0] * stereo[:, 0])),
                float(np.mean(stereo[:, 1] * stereo[:, 1])))
     if ch_p > 1e-8 and mix_p < 0.25 * ch_p:
-        return "diff"                      # PR #51 pure-cancellation case
-    st_mix = _env_stats(mix)
-    if st_mix["speech_frac"] >= 0.03:
-        return "mix"                       # healthy: voice survives the mix
-    st_diff = _env_stats(dif)
-    if st_diff["speech_frac"] >= 0.03 or st_diff["am_spread"] >= 0.3:
         return "diff"
     return "mix"
 
