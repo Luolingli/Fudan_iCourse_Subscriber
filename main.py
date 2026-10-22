@@ -304,6 +304,7 @@ def _probe_ppt_feed(client, sid: str, row: dict | None = None) -> None:
         from src.ai.ppt_dedup_config import (
             DHASH_THRESHOLD, DHASH_MAX_SURVIVORS,
         )
+        from src.ai.ocr import ocr_image_text
 
         items = client.get_ppt_list(
             str((row or {}).get("course_id") or ""), sid)
@@ -350,6 +351,47 @@ def _probe_ppt_feed(client, sid: str, row: dict | None = None) -> None:
               f"(cap {DHASH_MAX_SURVIVORS})  => extrapolated full-feed "
               f"kept≈{round(kept / max(fetched, 1) * len(items))}/{len(items)}",
               flush=True)
+
+        # THE decisive question: is the discarded material actually CONTENT?
+        # A blackboard fills the frame with low-contrast dark pixels, which
+        # collapses dHash toward all-zero — indistinguishable from a
+        # no-signal/desktop splash by hash alone.  OCR a handful of the very
+        # pages dedup threw away: chalk text there means the filters are
+        # destroying real board content, not discarding noise.
+        ocr_n = min(6, len(sample))
+        ocr_idx = [i for i in range(len(sample)) if i < ocr_n]
+        ocr_hit = ocr_chars = 0
+        snippets: list[str] = []
+        for i in ocr_idx:
+            img = fetch_ppt_image(client, sample[i], max_attempts=2,
+                                  timeout=30)
+            if img is None:
+                continue
+            try:
+                text = ocr_image_text(img)
+            except Exception as e:
+                print(f"  [ppt  ] OCR sample #{i} error "
+                      f"{type(e).__name__}: {str(e)[:60]}", flush=True)
+                continue
+            n_chars = len((text or "").strip())
+            ocr_chars += n_chars
+            if n_chars >= 12:
+                ocr_hit += 1
+                snippets.append(" ".join((text or "").split())[:70])
+        print(f"  [ppt  ] OCR on discarded pages: {ocr_hit}/{len(ocr_idx)} "
+              f"pages carried >=12 chars, total {ocr_chars} chars",
+              flush=True)
+        for s in snippets[:4]:
+            print(f"  [ppt  ]   text: {s}", flush=True)
+        if ocr_hit:
+            print("  [ppt  ] VERDICT: the dropped frames DO contain text — "
+                  "dedup is destroying board content (filters built for PPT "
+                  "slides, not a blackboard camera)", flush=True)
+        else:
+            print("  [ppt  ] VERDICT: dropped frames hold no OCR text — "
+                  "feed is genuinely contentless (camera pointing off the "
+                  "board / no-signal), not our filter's fault", flush=True)
+
         if kept == 0:
             print("  [ppt  ] VERDICT: dedup drops EVERY page — feed is "
                   "frame-cadence noise to dHash, not slides", flush=True)
