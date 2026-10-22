@@ -42,7 +42,10 @@ MODEL_PROVIDERS: list[dict] = [
         "base_url_env": "DASHSCOPE_BASE_URL",
         "default_base_url": "https://api-inference.modelscope.cn/v1/",
         "models": [
-            "deepseek-ai/DeepSeek-V4-Pro",
+            # 2026-10-22：删掉这一条 —— ModelScope 平台侧已无推理 provider，
+            # 调用恒 400 "Model id : deepseek-ai/DeepSeek-V4-Pro , has no
+            # provider supported"。2026-10-21、10-22 两次日巡每讲都先白试
+            # 它一次再落到 -0813；上游 cea361a（2026-10-01）同样已把它删除。
             "deepseek-ai/DeepSeek-V4-Pro-0813",
             "Qwen/Qwen3.5-397B-A17B",
             # 注意：ModelScope 上"有模型页但无推理 provider"的模型会恒 400
