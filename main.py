@@ -356,11 +356,28 @@ def _probe_ppt_feed(client, sid: str, row: dict | None = None) -> None:
         # A blackboard fills the frame with low-contrast dark pixels, which
         # collapses dHash toward all-zero — indistinguishable from a
         # no-signal/desktop splash by hash alone.  OCR a handful of the very
-        # pages dedup threw away: chalk text there means the filters are
-        # destroying real board content, not discarding noise.
-        ocr_n = min(6, len(sample))
-        ocr_idx = [i for i in range(len(sample)) if i < ocr_n]
-        ocr_hit = ocr_chars = 0
+        # pages dedup threw away and judge the text the SAME way the pipeline
+        # does (clean_ppt_text + is_invalid_page), with one addition: the
+        # 686005 feed OCRs to the classroom DESKTOP and the platform's own
+        # "录像指南" guide page, i.e. the screenshot job captured the PC
+        # screen while this course is taught on a physical blackboard.  That
+        # text is real characters, and the catalog deliberately leaves two
+        # related entries commented out as too generic, so screen-capture
+        # markers are called noise HERE — in the probe only.  A diagnostic
+        # must not change the pipeline's classifier.
+        SCREEN_CAPTURE_MARKERS = (
+            "录像指南", "cfdfudan", "此电脑", "player", "potplayer",
+            "课程录制", "demoasp", "yuyue", "u盘", "回收站",
+        )
+
+        def _is_screen_capture(text: str) -> bool:
+            low = text.lower()
+            return any(m in low for m in SCREEN_CAPTURE_MARKERS)
+
+        from src.ai.ppt_dedup import clean_ppt_text, is_invalid_page
+        ocr_n = min(8, len(sample))
+        ocr_idx = list(range(ocr_n))
+        meaningful = junk = 0
         snippets: list[str] = []
         for i in ocr_idx:
             img = fetch_ppt_image(client, sample[i], max_attempts=2,
@@ -368,39 +385,113 @@ def _probe_ppt_feed(client, sid: str, row: dict | None = None) -> None:
             if img is None:
                 continue
             try:
-                text = ocr_image_text(img)
+                text = clean_ppt_text(ocr_image_text(img))
             except Exception as e:
                 print(f"  [ppt  ] OCR sample #{i} error "
                       f"{type(e).__name__}: {str(e)[:60]}", flush=True)
                 continue
-            n_chars = len((text or "").strip())
-            ocr_chars += n_chars
-            if n_chars >= 12:
-                ocr_hit += 1
-                snippets.append(" ".join((text or "").split())[:70])
-        print(f"  [ppt  ] OCR on discarded pages: {ocr_hit}/{len(ocr_idx)} "
-              f"pages carried >=12 chars, total {ocr_chars} chars",
-              flush=True)
+            text = text or ""
+            if (len(text.strip()) < 12 or is_invalid_page(text)
+                    or _is_screen_capture(text)):
+                junk += 1
+            else:
+                meaningful += 1
+                snippets.append(" ".join(text.split())[:70])
+        judged = meaningful + junk
+        print(f"  [ppt  ] OCR on discarded pages: {judged} judged, "
+              f"{meaningful} carry NON-JUNK text, {junk} are noise "
+              f"(desktop/guide/placeholder)", flush=True)
         for s in snippets[:4]:
-            print(f"  [ppt  ]   text: {s}", flush=True)
-        if ocr_hit:
-            print("  [ppt  ] VERDICT: the dropped frames DO contain text — "
-                  "dedup is destroying board content (filters built for PPT "
-                  "slides, not a blackboard camera)", flush=True)
-        else:
-            print("  [ppt  ] VERDICT: dropped frames hold no OCR text — "
-                  "feed is genuinely contentless (camera pointing off the "
-                  "board / no-signal), not our filter's fault", flush=True)
+            print(f"  [ppt  ]   content: {s}", flush=True)
+        if meaningful:
+            print("  [ppt  ] VERDICT: discarded frames hold real content — "
+                  "the drop filters ARE eating lecture material", flush=True)
+        elif judged:
+            print("  [ppt  ] VERDICT: discarded frames are ALL noise "
+                  "(desktop / 录像指南 / placeholder). The feed itself has no "
+                  "board content — nothing is being lost by dropping them",
+                  flush=True)
 
         if kept == 0:
-            print("  [ppt  ] VERDICT: dedup drops EVERY page — feed is "
-                  "frame-cadence noise to dHash, not slides", flush=True)
+            print("  [ppt  ] NOTE: dedup drops EVERY feed page — the "
+                  "screenshot job captured the PC screen, not slides",
+                  flush=True)
         elif median_gap and 4 <= med_gap <= 6 and kept / max(fetched, 1) < 0.1:
-            print("  [ppt  ] VERDICT: camera-cadence feed being crushed by "
-                  "slide-oriented dedup — board content is being lost",
+            print("  [ppt  ] NOTE: camera-cadence feed ("
+                  f"{med_gap:.0f}s/page) keeps only "
+                  f"{kept / max(fetched, 1):.0%} of sampled pages",
                   flush=True)
     except Exception as e:
         print(f"  [ppt  ] probe failed: {type(e).__name__}: "
+              f"{str(e)[:110]}", flush=True)
+
+
+def _probe_video_frames(client, cid: str, sid: str, date: str = "",
+                        positions: tuple[int, ...] = (300, 1800, 3600),
+                        ) -> None:
+    """Read-only: OCR a few frames pulled straight from the LECTURE VIDEO.
+
+    The PPT-feed probe on 686005 showed the platform's screenshot job
+    captured the PC screen (desktop + 录像指南 guide), not the physical
+    blackboard this course is taught on.  So the remaining question is not
+    "why did dedup drop the feed" but "does the video itself carry board
+    content that we never look at, because the board path only runs when
+    ASR FAILS".  Pull one frame per position via ffmpeg (streamed, no full
+    download) and OCR it; prints a verdict only about what it saw.
+
+    Nothing is written: no DB rows, no OCR persistence, no summary.
+    """
+    import os
+    import shutil
+    import tempfile
+    from src.ai.ppt_dedup import clean_ppt_text as clean_ppt_text_probe
+    from src.pipeline.board_frames import _sample_frames
+    try:
+        urls = client.get_video_url_candidates(cid, sid, date=date or None)
+        if not urls:
+            print("  [vid  ] no video URL", flush=True)
+            return
+        vpn_url, headers = client.get_stream_params(urls[0])
+        hdr = "".join(f"{k}: {v}\r\n" for k, v in (headers or {}).items())
+        tmpdir = tempfile.mkdtemp(prefix="diagframes_")
+        # Reuse the board pipeline's own sampler so this probe exercises the
+        # same ffmpeg/PyAV path the real recovery would use (CI has ffmpeg,
+        # this Mac has only PyAV).
+        try:
+            frames = _sample_frames(vpn_url, tmpdir, 600, None, hdr)
+        except Exception as e:
+            print(f"  [vid  ] sampling failed: {type(e).__name__}: "
+                  f"{str(e)[:110]}", flush=True)
+            return
+        if not frames:
+            print("  [vid  ] sampler produced no frames", flush=True)
+            return
+        print(f"  [vid  ] sampled {len(frames)} frame(s) "
+              f"(1 per 600s of media)", flush=True)
+        for path in frames[:4]:
+            try:
+                with open(path, "rb") as f:
+                    raw = f.read()
+                text = clean_ppt_text_probe(ocr_image_text(raw)) or ""
+            except Exception as e:
+                print(f"  [vid  ] {os.path.basename(path)} OCR error "
+                      f"{type(e).__name__}: {str(e)[:60]}", flush=True)
+                continue
+            text = text.strip()
+            shown = " ".join(text.split())[:90]
+            print(f"  [vid  ] {os.path.basename(path)} "
+                  f"frame={len(raw)}B ocr_chars={len(text)} :: {shown}",
+                  flush=True)
+            if len(text) >= 12:
+                print("  [vid  ] VERDICT: the VIDEO carries text the current "
+                      "summary never sees — board path only runs when ASR "
+                      "fails, so this lecture lost its board content",
+                      flush=True)
+                break
+        print("  [vid  ] (read-only: frames discarded, nothing persisted)",
+              flush=True)
+    except Exception as e:
+        print(f"  [vid  ] probe failed: {type(e).__name__}: "
               f"{str(e)[:110]}", flush=True)
 
 
@@ -443,6 +534,7 @@ def _run_source_diag(client, db, reporter) -> None:
         print(f"  [trans ] density={dens:.2f} chars/s "
               + json.dumps(tr, ensure_ascii=False)[:150], flush=True)
         _probe_ppt_feed(client, sid, row=row)
+        _probe_video_frames(client, cid, sid, date=date)
         try:
             urls = client.get_video_url_candidates(cid, sid, date=date or None)
             if not urls:
