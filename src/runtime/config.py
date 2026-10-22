@@ -42,15 +42,20 @@ MODEL_PROVIDERS: list[dict] = [
         "base_url_env": "DASHSCOPE_BASE_URL",
         "default_base_url": "https://api-inference.modelscope.cn/v1/",
         "models": [
-            # 2026-10-22：删掉这一条 —— ModelScope 平台侧已无推理 provider，
-            # 调用恒 400 "Model id : deepseek-ai/DeepSeek-V4-Pro , has no
-            # provider supported"。2026-10-21、10-22 两次日巡每讲都先白试
-            # 它一次再落到 -0813；上游 cea361a（2026-10-01）同样已把它删除。
+            # 2026-10-22 用户指定：ModelScope 摘要改用 DeepSeek-V4.1-Flash-1017。
+            # 本机冒烟通过（/v1/chat/completions HTTP 200，中文输出正常，
+            # 档位 ultra=2 魔粒/次；用户确认 ModelScope 每日额度会自动刷新，
+            # 之前 429 insufficient balance 是旧 key 账户的问题，已换新 key）。
+            "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+            # 兜底：前一条若 429/无 provider，仍按原链往下试。
             "deepseek-ai/DeepSeek-V4-Pro-0813",
             "Qwen/Qwen3.5-397B-A17B",
             # 注意：ModelScope 上"有模型页但无推理 provider"的模型会恒 400
             # （如 DeepSeek-V4-Flash、MiniMax-M3、Tencent-Hunyuan/Hy3 实测空响应），
             # 加模型前必须先冒烟验证。2026-09-14。
+            # 2026-10-22：`deepseek-ai/DeepSeek-V4-Pro`（不带 -0813）已从列表
+            # 删除——平台侧无推理 provider，调用恒 400 "has no provider
+            # supported"，每讲白试一次；上游 cea361a 同样已删。
         ],
     },
     {
