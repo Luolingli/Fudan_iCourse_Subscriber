@@ -20,7 +20,7 @@ import traceback
 from src.runtime import config
 from src.data.database import Database
 from src.api.emailer import Emailer
-from src.api.icourse import ICourseClient
+from src.api.icourse import ICourseClient, fetch_ppt_image
 from src.pipeline.lecture_runner import LectureRunner
 from src.runtime.reporter import Reporter
 from src.runtime.scheduler import Scheduler
@@ -278,6 +278,90 @@ def _crawl_semester_catalog(client: ICourseClient, db: Database,
     reporter.info("Semester catalog crawl complete.")
 
 
+def _probe_ppt_feed(client, sid: str, row: dict | None = None) -> None:
+    """Read-only forensics for the PPT screenshot feed of one lecture.
+
+    Answers "does this lecture have board/board-slide content the summary is
+    silently missing?" — the question behind 泛函分析 686005 (2026-10-21:
+    `PPT pages: 1931 total` yet `PPT pipeline: 0 done, 1931 dedup'd`, i.e.
+    the whole feed was thrown away and the summary came from audio alone).
+
+    Prints one line per stage so the loss can be attributed rather than
+    guessed at:
+      [ppt  ] how many pages the platform offers + their time cadence
+      [ppt  ] dHash variety BEFORE dedup (distinct hashes, near-dup rate)
+      [ppt  ] how many each dedup stage would drop (garbage catalog /
+              pairwise at the live thresholds) and how many survive OCR
+      [ppt  ] how many OCR'd pages the DATABASE already keeps for it
+    Nothing is written: no DB rows, no OCR, no downloads beyond the feed
+    metadata and a sample of images capped by ``sample``.
+    """
+    import statistics
+    try:
+        from src.ai.ppt_dedup import (
+            compute_dhash, match_garbage, dedup_dhash,
+        )
+        from src.ai.ppt_dedup_config import (
+            DHASH_THRESHOLD, DHASH_MAX_SURVIVORS,
+        )
+
+        items = client.get_ppt_list(
+            str((row or {}).get("course_id") or ""), sid)
+        if not items:
+            print("  [ppt  ] feed EMPTY — no screenshot rows at all",
+                  flush=True)
+            return
+        secs = [int(i.get("created_sec") or 0) for i in items]
+        span = secs[-1] - secs[0] if len(secs) > 1 else 0
+        gaps = [b - a for a, b in zip(secs, secs[1:]) if b > a]
+        med_gap = statistics.median(gaps) if gaps else 0
+        print(f"  [ppt  ] pages={len(items)} span={span}s "
+              f"median_gap={med_gap:.1f}s "
+              f"cadence≈{'5s camera frame' if 4 <= med_gap <= 6 else 'slide changes'}",
+              flush=True)
+
+        # Sample evenly so a 1931-page feed still answers quickly.
+        sample_n = min(60, len(items))
+        step = max(1, len(items) // sample_n)
+        sample = items[::step][:sample_n]
+        dhashes, fetched = [], 0
+        for it in sample:
+            img = fetch_ppt_image(client, it, max_attempts=2, timeout=30)
+            if img is None:
+                continue
+            fetched += 1
+            dhashes.append(compute_dhash(img))
+        if not dhashes:
+            print(f"  [ppt  ] sampled {len(sample)} pages, none fetchable",
+                  flush=True)
+            return
+        distinct = len(set(h for h in dhashes if h))
+        print(f"  [ppt  ] sampled={len(sample)} fetched={fetched} "
+              f"distinct_dhash={distinct}/{fetched} "
+              f"({distinct / max(fetched, 1):.0%} unique)", flush=True)
+
+        garbage = match_garbage(dhashes)
+        survivors = [h for i, h in enumerate(dhashes) if i not in set(garbage)]
+        dropped = dedup_dhash(survivors)
+        kept = len(survivors) - len(dropped)
+        print(f"  [ppt  ] drop: garbage_catalog={len(garbage)} "
+              f"pairwise@{DHASH_THRESHOLD}={len(dropped)} "
+              f"-> survivors={kept}/{fetched} "
+              f"(cap {DHASH_MAX_SURVIVORS})  => extrapolated full-feed "
+              f"kept≈{round(kept / max(fetched, 1) * len(items))}/{len(items)}",
+              flush=True)
+        if kept == 0:
+            print("  [ppt  ] VERDICT: dedup drops EVERY page — feed is "
+                  "frame-cadence noise to dHash, not slides", flush=True)
+        elif median_gap and 4 <= med_gap <= 6 and kept / max(fetched, 1) < 0.1:
+            print("  [ppt  ] VERDICT: camera-cadence feed being crushed by "
+                  "slide-oriented dedup — board content is being lost",
+                  flush=True)
+    except Exception as e:
+        print(f"  [ppt  ] probe failed: {type(e).__name__}: "
+              f"{str(e)[:110]}", flush=True)
+
+
 def _run_source_diag(client, db, reporter) -> None:
     """Read-only forensics sweep for DIAG_SOURCE_IDS entries. A plain
     sub_id probes that one lecture; a ``c:<course_id>`` entry sweeps the
@@ -316,6 +400,7 @@ def _run_source_diag(client, db, reporter) -> None:
                 if tr.get("found") and tr.get("last_end_s") else 0)
         print(f"  [trans ] density={dens:.2f} chars/s "
               + json.dumps(tr, ensure_ascii=False)[:150], flush=True)
+        _probe_ppt_feed(client, sid, row=row)
         try:
             urls = client.get_video_url_candidates(cid, sid, date=date or None)
             if not urls:
