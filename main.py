@@ -755,17 +755,28 @@ def _run_ab_summary(client, db, reporter) -> None:
               f"{len(pages_before)} page(s)", flush=True)
 
         # Arm B needs board frames; reuse the production extraction path.
-        runner = LectureRunner(client, db, None, None, None, reporter)
-        runner._last_media_duration = None
-        recovered = 0
-        if len(base_text) < config.BOARD_TEXT_MIN_CHARS and config.BOARD_FALLBACK:
-            try:
-                recovered = runner._board_from_video(
-                    str(row.get("course_id") or ""), sid,
-                    str(row.get("date") or ""))
-            except Exception as e:
-                print(f"  [ab   ] board extraction failed: "
-                      f"{type(e).__name__}: {str(e)[:110]}", flush=True)
+        # A REAL Scheduler is mandatory: extract_board_pages submits its OCR
+        # work through scheduler.submit_ocr, so passing None made every
+        # variant die with "'NoneType' object has no attribute 'submit_ocr'"
+        # — run 39911424109 recovered 488 frames and 35 deduped pages, then
+        # threw them all away, so the A/B compared two audio-only summaries.
+        board_scheduler = Scheduler(reporter=reporter)
+        try:
+            runner = LectureRunner(client, db, board_scheduler, None, None,
+                                   reporter)
+            runner._last_media_duration = None
+            recovered = 0
+            if (len(base_text) < config.BOARD_TEXT_MIN_CHARS
+                    and config.BOARD_FALLBACK):
+                try:
+                    recovered = runner._board_from_video(
+                        str(row.get("course_id") or ""), sid,
+                        str(row.get("date") or ""))
+                except Exception as e:
+                    print(f"  [ab   ] board extraction failed: "
+                          f"{type(e).__name__}: {str(e)[:110]}", flush=True)
+        finally:
+            board_scheduler.shutdown()
         pages_after = db.get_done_ppt_pages(sid)
         board_text = "\n".join(
             p.get("text", "") for p in pages_after
