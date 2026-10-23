@@ -352,6 +352,12 @@ AB_SUMMARY_IDS = [
     for s in os.environ.get("AB_SUMMARY_IDS", "").split(",")
     if s.strip()
 ]
+# A/B 对照要成立，两臂必须用**同一个模型**；否则「板书贡献」和「模型差异」
+# 混在一起无法归因（2026-10-23 run 39927218197：arm A 走 ModelScope V4.1-Flash，
+# arm B 因 429 insufficient balance 落到 deepseek-flash，+268% 无法归因）。
+# 设为 "provider/model" 时，A/B 模式只把该模型放进候选链；空 = 用生产回退链。
+# 例：AB_MODEL=deepseek/deepseek-flash
+AB_MODEL = os.environ.get("AB_MODEL", "").strip()
 
 DIAG_SOURCE_IDS = [
     s.strip()

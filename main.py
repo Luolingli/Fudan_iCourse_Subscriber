@@ -820,8 +820,10 @@ def _run_ab_summary(client, db, reporter) -> None:
             transcript, [], slides_after + boards_after)
 
         arm_a = arm_b = ""
+        _summ = _get_summarizer()
+        _pin_model(_summ, config.AB_MODEL)
         try:
-            arm_a, model_a = _get_summarizer().summarize(
+            arm_a, model_a = _summ.summarize(
                 row.get("sub_title") or sid, prompt_a)
             print(f"  [ab   ] arm A (asr only)      : {len(arm_a)} chars "
                   f"via {model_a}", flush=True)
@@ -829,7 +831,7 @@ def _run_ab_summary(client, db, reporter) -> None:
             print(f"  [ab   ] arm A failed: {type(e).__name__}: "
                   f"{str(e)[:110]}", flush=True)
         try:
-            arm_b, model_b = _get_summarizer().summarize(
+            arm_b, model_b = _summ.summarize(
                 row.get("sub_title") or sid, prompt_b)
             print(f"  [ab   ] arm B (asr + board)   : {len(arm_b)} chars "
                   f"via {model_b}", flush=True)
@@ -837,6 +839,11 @@ def _run_ab_summary(client, db, reporter) -> None:
             print(f"  [ab   ] arm B failed: {type(e).__name__}: "
                   f"{str(e)[:110]}", flush=True)
 
+        if arm_a and arm_b and model_a != model_b:
+            print(f"  [ab   ] WARNING: arms used DIFFERENT models "
+                  f"(A={model_a}, B={model_b}) — the delta below mixes board "
+                  f"contribution with model difference. Set AB_MODEL to pin "
+                  f"both arms before trusting it.", flush=True)
         if arm_a and arm_b:
             # Objective checks.  (1) Term coverage: proper names / theorem
             # names that appear in the BOARD text are exactly what ASR
@@ -850,9 +857,22 @@ def _run_ab_summary(client, db, reporter) -> None:
                 if t.lower() not in ("thm", "def", "cor", "sup", "inf",
                                      "theorem", "definition")})[:18]
 
+            # OCR writes "Hahn-Banach" (ASCII hyphen) while an LLM summary
+            # writes "Hahn–Banach" (en dash) — and may space the hyphen
+            # ("Hahn - Banach"). Matching the raw strings undercounts both
+            # arms; normalize every dash variant and surrounding spaces on
+            # BOTH sides before comparing.
+            def _norm(s: str) -> str:
+                s = s.lower()
+                for dash in ("\u2010", "\u2011", "\u2012", "\u2013",
+                             "\u2014", "\u2015", "\u2212", "\uff0d"):
+                    s = s.replace(dash, "-")
+                s = _re.sub(r"\s*-\s*", "-", s)
+                return s
+
             def _hits(summary, terms):
-                low = summary.lower()
-                return [t for t in terms if t.lower() in low]
+                low = _norm(summary)
+                return [t for t in terms if _norm(t) in low]
 
             markers = sorted({
                 m for m in _re.findall(
@@ -879,11 +899,44 @@ _summ_singleton = None
 
 
 def _get_summarizer():
-    """Shared Summarizer for read-only modes (model fallback chain reused)."""
+    """Summarizer for read-only modes.
+
+    A/B mode PINS the model when AB_MODEL is set: both arms must run on the
+    same model or the comparison measures the model, not the board.  Run
+    39927218197 hit exactly that — arm A on ModelScope V4.1-Flash, arm B
+    silently fallen through to deepseek-flash after a 429.
+    """
     global _summ_singleton
     if _summ_singleton is None:
         _summ_singleton = Summarizer()
     return _summ_singleton
+
+
+def _pin_model(summarizer, spec: str):
+    """Restrict a Summarizer to exactly one "provider/model", or no-op."""
+    spec = (spec or "").strip()
+    if not spec or "/" not in spec:
+        return True
+    want_prov, want_model = spec.split("/", 1)
+    kept = []
+    for prov in summarizer.providers:
+        if prov.get("name") != want_prov:
+            continue
+        if want_model not in (prov.get("models") or []):
+            print(f"  [ab   ] AB_MODEL {spec!r}: model not in provider list "
+                  f"{prov.get('models')}", flush=True)
+            return False
+        prov = dict(prov)
+        prov["models"] = [want_model]
+        kept.append(prov)
+    if not kept:
+        print(f"  [ab   ] AB_MODEL {spec!r}: provider not configured",
+              flush=True)
+        return False
+    summarizer.providers = kept
+    print(f"  [ab   ] pinned BOTH arms to {spec} (clean comparison)",
+          flush=True)
+    return True
 
 
 def run():
