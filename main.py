@@ -721,6 +721,130 @@ def _run_asr_probes(transcriber, reporter) -> None:
             )
 
 
+def _run_ab_summary(client, db, reporter) -> None:
+    """A/B a lecture's summary with and without board OCR — measures what the
+    blackboard actually adds, instead of asserting it.
+
+    For each sub_id in AB_SUMMARY_IDS: read the ALREADY DELIVERED transcript
+    from the DB, fetch board frames from the video (read-only, same path a
+    normal run uses), then summarize TWICE with the SAME model and the SAME
+    transcript — once with the platform's page text only (arm A, the status
+    quo for a board course: nothing) and once with the board supplement
+    (arm B).  Prints both lengths, the board contribution, a term-coverage
+    delta, and the head of each summary so the difference is readable.
+
+    NOTHING is written: no summary, no transcript, no flags, no email.  The
+    DB only gets board ppt_pages rows, which the normal pipeline also creates
+    and which are idempotent by page_num.
+    """
+    import re as _re
+    from src.ai import bucketer
+    for sid in config.AB_SUMMARY_IDS:
+        row = db.get_lecture(sid) or {}
+        transcript = (row.get("transcript") or "").strip()
+        print(f"\n=== AB {sid} course={row.get('course_id')} "
+              f"title={row.get('sub_title')} "
+              f"transcript={len(transcript)} chars ===", flush=True)
+        if not transcript:
+            print("  [ab   ] no delivered transcript in DB — skip "
+                  "(nothing to hold constant across arms)", flush=True)
+            continue
+        pages_before = db.get_done_ppt_pages(sid)
+        base_text = "\n".join(p.get("text", "") for p in pages_before).strip()
+        print(f"  [ab   ] platform page text: {len(base_text)} chars, "
+              f"{len(pages_before)} page(s)", flush=True)
+
+        # Arm B needs board frames; reuse the production extraction path.
+        runner = LectureRunner(client, db, None, None, None, reporter)
+        runner._last_media_duration = None
+        recovered = 0
+        if len(base_text) < config.BOARD_TEXT_MIN_CHARS and config.BOARD_FALLBACK:
+            try:
+                recovered = runner._board_from_video(
+                    str(row.get("course_id") or ""), sid,
+                    str(row.get("date") or ""))
+            except Exception as e:
+                print(f"  [ab   ] board extraction failed: "
+                      f"{type(e).__name__}: {str(e)[:110]}", flush=True)
+        pages_after = db.get_done_ppt_pages(sid)
+        board_text = "\n".join(
+            p.get("text", "") for p in pages_after
+            if int(p.get("page_num") or 0) >= 10000).strip()
+        print(f"  [ab   ] board recovered: {recovered} page(s), "
+              f"{len(board_text)} chars", flush=True)
+
+        # Arm A: transcript + platform pages (what 686005 shipped with).
+        prompt_a, mode_a = bucketer.assemble(transcript, [], pages_before)
+        # Arm B: transcript + platform pages + board rows.
+        prompt_b, _ = bucketer.assemble(transcript, [], pages_after)
+
+        arm_a = arm_b = ""
+        try:
+            arm_a, model_a = _get_summarizer().summarize(
+                row.get("sub_title") or sid, prompt_a)
+            print(f"  [ab   ] arm A (asr only)      : {len(arm_a)} chars "
+                  f"via {model_a}", flush=True)
+        except Exception as e:
+            print(f"  [ab   ] arm A failed: {type(e).__name__}: "
+                  f"{str(e)[:110]}", flush=True)
+        try:
+            arm_b, model_b = _get_summarizer().summarize(
+                row.get("sub_title") or sid, prompt_b)
+            print(f"  [ab   ] arm B (asr + board)   : {len(arm_b)} chars "
+                  f"via {model_b}", flush=True)
+        except Exception as e:
+            print(f"  [ab   ] arm B failed: {type(e).__name__}: "
+                  f"{str(e)[:110]}", flush=True)
+
+        if arm_a and arm_b:
+            # Objective checks.  (1) Term coverage: proper names / theorem
+            # names that appear in the BOARD text are exactly what ASR
+            # mangles ("Hahn-Bamaeh" in the 686005 transcript vs
+            # "Hahn-Banach" on the board) or omits entirely, so counting how
+            # many the summary actually captured is the measurable signal.
+            # (2) Section-structure coverage: board lectures are organized
+            # by §/Def/Thm/Cor numbering that only exists on the board.
+            terms = sorted({t for t in _re.findall(
+                r"[A-Za-z][A-Za-z\-]{3,}", board_text)
+                if t.lower() not in ("thm", "def", "cor", "sup", "inf",
+                                     "theorem", "definition")})[:18]
+
+            def _hits(summary, terms):
+                low = summary.lower()
+                return [t for t in terms if t.lower() in low]
+
+            markers = sorted({
+                m for m in _re.findall(
+                    r"(?:§\s*\d+(?:\.\d+)*|(?:Thm|Def|Cor|Lem|Prop)\.?\s*"
+                    r"\d+\.\d+(?:\.\d+)?)", board_text)})
+            ha, hb = _hits(arm_a, terms), _hits(arm_b, terms)
+            ma, mb = _hits(arm_a, markers), _hits(arm_b, markers)
+            print(f"  [ab   ] delta: {len(arm_b) - len(arm_a):+d} chars "
+                  f"({(len(arm_b) / max(len(arm_a), 1) - 1):+.0%})", flush=True)
+            print(f"  [ab   ] board-term coverage: A={len(ha)}/"
+                  f"{len(terms)} B={len(hb)}/{len(terms)}", flush=True)
+            print(f"  [ab   ] board-section coverage: A={len(ma)}/"
+                  f"{len(markers)} B={len(mb)}/{len(markers)}", flush=True)
+            new_terms = [t for t in hb if t not in ha]
+            print(f"  [ab   ] terms only B captured: {new_terms[:10]}",
+                  flush=True)
+            print(f"  [ab   ] --- arm A head ---\n{arm_a[:300]}", flush=True)
+            print(f"  [ab   ] --- arm B head ---\n{arm_b[:300]}", flush=True)
+        print("  [ab   ] (read-only: nothing persisted, nothing emailed)",
+              flush=True)
+
+
+_summ_singleton = None
+
+
+def _get_summarizer():
+    """Shared Summarizer for read-only modes (model fallback chain reused)."""
+    global _summ_singleton
+    if _summ_singleton is None:
+        _summ_singleton = Summarizer()
+    return _summ_singleton
+
+
 def run():
     """Single execution of the full pipeline."""
     reporter = Reporter()
@@ -758,6 +882,12 @@ def run():
         # both stacks + official-transcript availability, then stop — no
         # lecture processing this run (DB untouched → commit skipped).
         _run_source_diag(client, db, reporter)
+        return
+
+    if config.AB_SUMMARY_IDS:
+        # Read-only A/B mode: same transcript, same model, with vs without
+        # board OCR — quantifies the board contribution, changes nothing.
+        _run_ab_summary(client, db, reporter)
         return
 
     email_items: list = []

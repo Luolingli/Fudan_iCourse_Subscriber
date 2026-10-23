@@ -22,6 +22,11 @@ on:
         required: false
         default: ""
         type: string
+      ab_summary_ids:
+        description: "Read-only A/B: summarize these sub_ids twice (audio-only vs audio+board OCR) with the same model; prints length/term delta, persists nothing"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -187,6 +192,7 @@ jobs:
           FORCE_CRAWL: ${{ github.event.inputs.force_crawl == 'true' }}
           FORCE_SUB_IDS: ${{ github.event.inputs.force_sub_ids }}
           DIAG_SOURCE_IDS: ${{ github.event.inputs.diag_source_ids }}
+          AB_SUMMARY_IDS: ${{ github.event.inputs.ab_summary_ids }}
           SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}

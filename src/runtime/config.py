@@ -342,6 +342,17 @@ AUDIO_GATE_MAX_DAYS = int(os.environ.get("AUDIO_GATE_MAX_DAYS", "3"))
 # duration/size)和平台官方转录可用性(search-trans-result,#44 遗传学就是
 # 靠它绕过的)。全部只读,不写 DB,几分钟出表,用于裁决"哑件/截断是对象维度
 # 还是路径维度"以及"官方字幕能不能直接救命"。
+# A/B 摘要对照实验（只读）：对每节讲义用**同一个模型**各生成一份摘要——
+# 一份只用音频转录（现状），一份加上从视频抽帧 OCR 的板书文字，打印长度差、
+# 板书专有名词覆盖差和两份摘要开头，用来量化「板书对 ASR 到底有多大提升」。
+# 不写摘要、不写邮件、不动已完成标记；仅在 workflow_dispatch 手动触发时用。
+# 例：AB_SUMMARY_IDS=686005
+AB_SUMMARY_IDS = [
+    s.strip()
+    for s in os.environ.get("AB_SUMMARY_IDS", "").split(",")
+    if s.strip()
+]
+
 DIAG_SOURCE_IDS = [
     s.strip()
     for s in os.environ.get("DIAG_SOURCE_IDS", "").split(",")
