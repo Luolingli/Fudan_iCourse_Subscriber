@@ -545,17 +545,25 @@ def _run_source_diag(client, db, reporter) -> None:
     am_spread≈0.05, buried-but-present speech still shows ≥0.3."""
     import json
     from src.ai.transcriber import probe_audio
+    # "a:" prefix = audit only. Saves a workflow_dispatch approval for what is
+    # just a DB read, and keeps the switch in the same input the operator is
+    # already typing.  a:c:37547 sweeps a course without touching the network.
+    audit_only = config.DIAG_AUDIT_ONLY or any(
+        str(e).strip().startswith("a:") for e in config.DIAG_SOURCE_IDS)
     targets: list[tuple[str, str, str]] = []
     for entry in config.DIAG_SOURCE_IDS:
-        if str(entry).startswith("c:"):
-            cid = str(entry)[2:].strip()
+        entry = str(entry).strip()
+        if entry.startswith("a:"):
+            entry = entry[2:].strip()
+        if entry.startswith("c:"):
+            cid = entry[2:].strip()
             for row in db.list_lecture_digests(cid):
                 targets.append((cid, str(row["sub_id"]),
                                 str(row.get("date") or "")))
         else:
-            row = db.get_lecture(str(entry)) or {}
+            row = db.get_lecture(entry) or {}
             targets.append((str(row.get("course_id") or ""),
-                            str(entry), str(row.get("date") or "")))
+                            entry, str(row.get("date") or "")))
     def _audit(sid, row):
         """Per-lecture content inventory, straight from the local DB.
 
@@ -600,7 +608,7 @@ def _run_source_diag(client, db, reporter) -> None:
             rollup.append((sid, _audit(sid, row)))
         except Exception as e:
             print(f"  [audit ] failed: {type(e).__name__}: {e}", flush=True)
-        if config.DIAG_AUDIT_ONLY:
+        if audit_only:
             # Pure DB inventory: no network probes, no downloads.
             continue
         tr = client.probe_official_transcript(sid)
