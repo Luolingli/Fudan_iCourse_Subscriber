@@ -749,10 +749,35 @@ def _run_ab_summary(client, db, reporter) -> None:
             print("  [ab   ] no delivered transcript in DB — skip "
                   "(nothing to hold constant across arms)", flush=True)
             continue
-        pages_before = db.get_done_ppt_pages(sid)
-        base_text = "\n".join(p.get("text", "") for p in pages_before).strip()
-        print(f"  [ab   ] platform page text: {len(base_text)} chars, "
-              f"{len(pages_before)} page(s)", flush=True)
+        # Board rows are stored in ppt_pages with page_num >= 10000 and are
+        # INDISTINGUISHABLE from platform pages via get_done_ppt_pages.  That
+        # broke the A/B twice: once a previous run had OCR'd the board into
+        # the DB, pages_before already contained it and BOTH arms got the
+        # same material (run 39918668873: "platform page text: 63391 chars,
+        # 115 page(s)" before extraction, delta +32 chars, +0%).
+        #
+        # So the arms are defined by CONTENT, not by query time:
+        #   platform pages = page_num <  BOARD_PAGE_NUM_BASE  (real slides)
+        #   board pages    = page_num >= BOARD_PAGE_NUM_BASE  (video frames)
+        _BOARD_BASE = 10000
+
+        def _split_pages(rows):
+            slides, boards = [], []
+            for p in rows:
+                try:
+                    num = int(p.get("page_num") or 0)
+                except (TypeError, ValueError):
+                    num = 0
+                (boards if num >= _BOARD_BASE else slides).append(p)
+            return slides, boards
+
+        pages_now = db.get_done_ppt_pages(sid)
+        slides_now, boards_now = _split_pages(pages_now)
+        base_text = "\n".join(p.get("text", "") for p in slides_now).strip()
+        print(f"  [ab   ] existing: {len(slides_now)} slide page(s) "
+              f"({len(base_text)} chars), {len(boards_now)} board page(s) "
+              f"({len(chr(10).join(p.get('text','') for p in boards_now).strip())} chars)",
+              flush=True)
 
         # Arm B needs board frames; reuse the production extraction path.
         # A REAL Scheduler is mandatory: extract_board_pages submits its OCR
@@ -766,8 +791,7 @@ def _run_ab_summary(client, db, reporter) -> None:
                                    reporter)
             runner._last_media_duration = None
             recovered = 0
-            if (len(base_text) < config.BOARD_TEXT_MIN_CHARS
-                    and config.BOARD_FALLBACK):
+            if len(base_text) < config.BOARD_TEXT_MIN_CHARS and config.BOARD_FALLBACK:
                 try:
                     recovered = runner._board_from_video(
                         str(row.get("course_id") or ""), sid,
@@ -777,17 +801,23 @@ def _run_ab_summary(client, db, reporter) -> None:
                           f"{type(e).__name__}: {str(e)[:110]}", flush=True)
         finally:
             board_scheduler.shutdown()
-        pages_after = db.get_done_ppt_pages(sid)
+        slides_after, boards_after = _split_pages(db.get_done_ppt_pages(sid))
         board_text = "\n".join(
-            p.get("text", "") for p in pages_after
-            if int(p.get("page_num") or 0) >= 10000).strip()
-        print(f"  [ab   ] board recovered: {recovered} page(s), "
-              f"{len(board_text)} chars", flush=True)
+            p.get("text", "") for p in boards_after).strip()
+        print(f"  [ab   ] board available: {len(boards_after)} page(s), "
+              f"{len(board_text)} chars (recovered {recovered} this run)",
+              flush=True)
+        if not board_text.strip():
+            print("  [ab   ] NO board text — arms would be identical, "
+                  "skipping this lecture rather than reporting a fake +0%",
+                  flush=True)
+            continue
 
-        # Arm A: transcript + platform pages (what 686005 shipped with).
-        prompt_a, mode_a = bucketer.assemble(transcript, [], pages_before)
-        # Arm B: transcript + platform pages + board rows.
-        prompt_b, _ = bucketer.assemble(transcript, [], pages_after)
+        # Arm A: transcript + platform SLIDES only (board rows removed).
+        prompt_a, mode_a = bucketer.assemble(transcript, [], slides_after)
+        # Arm B: transcript + platform slides + board rows.
+        prompt_b, _ = bucketer.assemble(
+            transcript, [], slides_after + boards_after)
 
         arm_a = arm_b = ""
         try:
