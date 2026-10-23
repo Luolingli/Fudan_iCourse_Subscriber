@@ -28,6 +28,25 @@ def _format_timestamp(seconds: int) -> str:
     return f"{m:02d}:{s:02d}"
 
 
+# Synthetic board rows are stored with page_num >= BOARD_PAGE_NUM_BASE (10000)
+# because the blackboard is sampled from the video, not a slide deck.  They
+# must not be labelled as PPT pages: "页 10000" is meaningless to the model and
+# invites it to treat the number as a slide index.
+_BOARD_PAGE_NUM_BASE = 10000
+
+
+def _page_label(page_num, ts: str) -> str:
+    """Human label for one page row — board frames vs real slides."""
+    try:
+        num = int(page_num)
+    except (TypeError, ValueError):
+        num = 0
+    if num >= _BOARD_PAGE_NUM_BASE:
+        return f"[板书 @ {ts}]"
+    return f"[页 {num} @ {ts}]" if num else f"[@ {ts}]"
+
+
+
 def assemble_bucketed(
     transcript_segments: list[dict], ppt_pages: list[dict],
 ) -> str:
@@ -64,11 +83,10 @@ def assemble_bucketed(
 
         pages = ppt_by_bucket.get(b, [])
         if pages:
-            out.append("【PPT 文字识别】")
+            out.append("【课件/板书 文字识别】")
             for p in pages:
                 ts = _format_timestamp(int(p["created_sec"]))
-                page_num = p.get("page_num", "")
-                tag = f"[页 {page_num} @ {ts}]" if page_num else f"[@ {ts}]"
+                tag = _page_label(p.get("page_num", ""), ts)
                 text = clean_ppt_text(p.get("text") or "").strip()
                 if text:
                     out.append(f"{tag}\n{text}")
@@ -84,14 +102,13 @@ def assemble_flat(transcript: str, ppt_pages: list[dict]) -> str:
         parts.append(transcript.strip())
         parts.append("")
     if ppt_pages:
-        parts.append("【PPT 文字识别（按出现顺序）】")
+        parts.append("【课件/板书 文字识别（按出现顺序）】")
         sorted_pages = sorted(
             ppt_pages, key=lambda p: int(p.get("created_sec", 0))
         )
         for p in sorted_pages:
             ts = _format_timestamp(int(p.get("created_sec", 0)))
-            page_num = p.get("page_num", "")
-            tag = f"[页 {page_num} @ {ts}]" if page_num else f"[@ {ts}]"
+            tag = _page_label(p.get("page_num", ""), ts)
             text = (p.get("text") or "").strip()
             if text:
                 parts.append(f"{tag}\n{text}")
