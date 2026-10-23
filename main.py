@@ -556,7 +556,36 @@ def _run_source_diag(client, db, reporter) -> None:
             row = db.get_lecture(str(entry)) or {}
             targets.append((str(row.get("course_id") or ""),
                             str(entry), str(row.get("date") or "")))
+    def _audit(sid, row):
+        """Per-lecture content inventory, straight from the local DB.
+
+        Answers "which lecture is missing its board?" without touching the
+        network: slides are ppt_pages with page_num < 10000, board frames are
+        page_num >= 10000 (synthetic rows sampled from the video).
+        """
+        pages = db.get_done_ppt_pages(sid) or []
+        slides, boards = [], []
+        for pg in pages:
+            try:
+                num = int(pg.get("page_num") or 0)
+            except (TypeError, ValueError):
+                num = 0
+            (boards if num >= 10000 else slides).append(pg)
+        s_chars = sum(len((pg.get("text") or "").strip()) for pg in slides)
+        b_chars = sum(len((pg.get("text") or "").strip()) for pg in boards)
+        t_chars = len((row.get("transcript") or "").strip())
+        m_chars = len((row.get("summary") or "").strip())
+        # 有转录、课件文字不足、且完全没有板书 = 纯 ASR 交付，正是 Phase E3 要补的。
+        gap = "MISSING-BOARD" if (t_chars and s_chars < 300
+                                  and b_chars == 0) else ""
+        print(f"  [audit ] transcript={t_chars}c summary={m_chars}c "
+              f"slides={len(slides)}p/{s_chars}c "
+              f"boards={len(boards)}p/{b_chars}c {gap}", flush=True)
+        return dict(t=t_chars, m=m_chars, sc=s_chars, bc=b_chars,
+                    gap=bool(gap))
+
     seen = set()
+    rollup = []
     for cid, sid, date in targets:
         if sid in seen:
             continue
@@ -567,6 +596,13 @@ def _run_source_diag(client, db, reporter) -> None:
             f"processed={bool(row.get('processed_at'))} "
             f"err={row.get('error_stage')} ==="
         )
+        try:
+            rollup.append((sid, _audit(sid, row)))
+        except Exception as e:
+            print(f"  [audit ] failed: {type(e).__name__}: {e}", flush=True)
+        if config.DIAG_AUDIT_ONLY:
+            # Pure DB inventory: no network probes, no downloads.
+            continue
         tr = client.probe_official_transcript(sid)
         dens = (tr["chars"] / tr["last_end_s"]
                 if tr.get("found") and tr.get("last_end_s") else 0)
@@ -619,6 +655,17 @@ def _run_source_diag(client, db, reporter) -> None:
         except Exception as e:
             print(f"  [env   ] probe failed: "
                   f"{type(e).__name__}: {str(e)[:90]}", flush=True)
+
+    if rollup:
+        missing = [sid for sid, a in rollup if a["gap"]]
+        have_b = [sid for sid, a in rollup if a["bc"] > 0]
+        no_tr = [sid for sid, a in rollup if a["t"] == 0]
+        print(f"  [audit ] === course rollup: {len(rollup)} lecture(s), "
+              f"{len(have_b)} with board, {len(missing)} missing board "
+              f"(transcript but no slide text, no board), "
+              f"{len(no_tr)} with no transcript ===", flush=True)
+        if missing:
+            print(f"  [audit ] board candidates: {missing}", flush=True)
 
 
 def _run_asr_probes(transcriber, reporter) -> None:

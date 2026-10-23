@@ -359,6 +359,12 @@ AB_SUMMARY_IDS = [
 # 例：AB_MODEL=deepseek/deepseek-flash
 AB_MODEL = os.environ.get("AB_MODEL", "").strip()
 
+# 只读审计：DIAG_SOURCE_IDS 里每讲只读本地 DB，打印
+# transcript/summary/slides/boards 四列，不做任何网络探测。
+# 用途：判断"哪些讲缺板书"，避免为一次盘点去下载视频。
+DIAG_AUDIT_ONLY = os.environ.get(
+    "DIAG_AUDIT_ONLY", "").strip().lower() in ("1", "true", "yes")
+
 DIAG_SOURCE_IDS = [
     s.strip()
     for s in os.environ.get("DIAG_SOURCE_IDS", "").split(",")
