@@ -427,38 +427,49 @@ def _probe_ppt_feed(client, sid: str, row: dict | None = None) -> None:
 
 
 def _probe_video_frames(client, cid: str, sid: str, date: str = "",
-                        positions: tuple[int, ...] = (300, 1800, 3600),
+                        interval: int = 600, max_ocr: int = 8,
                         ) -> None:
-    """Read-only: OCR a few frames pulled straight from the LECTURE VIDEO.
+    """Read-only: sample the LECTURE VIDEO and OCR its frames.
 
-    The PPT-feed probe on 686005 showed the platform's screenshot job
-    captured the PC screen (desktop + 录像指南 guide), not the physical
-    blackboard this course is taught on.  So the remaining question is not
-    "why did dedup drop the feed" but "does the video itself carry board
-    content that we never look at, because the board path only runs when
-    ASR FAILS".  Pull one frame per position via ffmpeg (streamed, no full
-    download) and OCR it; prints a verdict only about what it saw.
+    Why this exists: the PPT-feed probe proved 686005's screenshot feed is the
+    classroom PC screen (desktop + 录像指南 guide), so the platform never
+    captured any blackboard for this course.  That leaves exactly one possible
+    home for board content — the video itself — and the board-recovery path
+    only runs when ASR FAILS (686005 transcribed 26,349 chars, so it never
+    ran).  This probe pulls frames straight from the video and OCRs them, so
+    "the video has a blackboard we never look at" becomes a measured fact
+    instead of an assumption.
 
-    Nothing is written: no DB rows, no OCR persistence, no summary.
+    Each frame is classified the way the pipeline would see it:
+      board   — real text that is NOT a screen-capture artifact
+      screen  — desktop / 录像指南 / player chrome (what the feed showed)
+      empty   — (near) no OCR text at all
+    Frames are discarded and nothing is persisted: read-only by construction.
     """
     import os
     import shutil
     import tempfile
-    from src.ai.ppt_dedup import clean_ppt_text as clean_ppt_text_probe
+    from src.ai.ppt_dedup import clean_ppt_text as _clean
     from src.pipeline.board_frames import _sample_frames
+    # Screen-capture markers only CLASSIFY here; the production catalog keeps
+    # two of these commented out as too generic, and a probe must not change
+    # the pipeline it measures.
+    _SCREEN = ("录像指南", "cfdfudan", "此电脑", "player", "potplayer",
+               "课程录制", "demoasp", "yuyue", "u盘", "回收站", "资源管理器")
+    tmpdir = None
     try:
         urls = client.get_video_url_candidates(cid, sid, date=date or None)
         if not urls:
             print("  [vid  ] no video URL", flush=True)
             return
         vpn_url, headers = client.get_stream_params(urls[0])
-        hdr = "".join(f"{k}: {v}\r\n" for k, v in (headers or {}).items())
+        # get_stream_params already returns ffmpeg-format header TEXT
+        # ("Cookie: ...\r\nUser-Agent: ...\r\n"), not a dict — pass it
+        # through exactly as board_frames.extract_board_pages does.
         tmpdir = tempfile.mkdtemp(prefix="diagframes_")
-        # Reuse the board pipeline's own sampler so this probe exercises the
-        # same ffmpeg/PyAV path the real recovery would use (CI has ffmpeg,
-        # this Mac has only PyAV).
         try:
-            frames = _sample_frames(vpn_url, tmpdir, 600, None, hdr)
+            frames = _sample_frames(vpn_url, tmpdir, interval, None,
+                                    headers or "")
         except Exception as e:
             print(f"  [vid  ] sampling failed: {type(e).__name__}: "
                   f"{str(e)[:110]}", flush=True)
@@ -467,32 +478,60 @@ def _probe_video_frames(client, cid: str, sid: str, date: str = "",
             print("  [vid  ] sampler produced no frames", flush=True)
             return
         print(f"  [vid  ] sampled {len(frames)} frame(s) "
-              f"(1 per 600s of media)", flush=True)
-        for path in frames[:4]:
+              f"(1 per {interval}s of media)", flush=True)
+        # Spread the OCR samples across the whole lecture rather than its
+        # first minutes: a board lecture can open with 20 min of talking.
+        if len(frames) <= max_ocr:
+            pick = frames
+        else:
+            pick = [frames[round(i * (len(frames) - 1) / (max_ocr - 1))]
+                    for i in range(max_ocr)]
+        counts = {"board": 0, "screen": 0, "empty": 0}
+        for path in pick:
             try:
                 with open(path, "rb") as f:
                     raw = f.read()
-                text = clean_ppt_text_probe(ocr_image_text(raw)) or ""
+                text = (_clean(ocr_image_text(raw)) or "").strip()
             except Exception as e:
                 print(f"  [vid  ] {os.path.basename(path)} OCR error "
                       f"{type(e).__name__}: {str(e)[:60]}", flush=True)
                 continue
-            text = text.strip()
-            shown = " ".join(text.split())[:90]
-            print(f"  [vid  ] {os.path.basename(path)} "
-                  f"frame={len(raw)}B ocr_chars={len(text)} :: {shown}",
+            low = text.lower()
+            if len(text) < 12:
+                kind = "empty"
+            elif any(m in low for m in _SCREEN):
+                kind = "screen"
+            else:
+                kind = "board"
+            counts[kind] += 1
+            print(f"  [vid  ] {os.path.basename(path):12s} {kind:6s} "
+                  f"chars={len(text):4d} :: "
+                  f"{' '.join(text.split())[:80]}", flush=True)
+        total = sum(counts.values())
+        print(f"  [vid  ] classified {total}: board={counts['board']} "
+              f"screen={counts['screen']} empty={counts['empty']}",
+              flush=True)
+        if counts["board"]:
+            print("  [vid  ] VERDICT: the VIDEO carries board text that no "
+                  "summary ever sees — the board path only runs when ASR "
+                  "fails, so lectures like this silently lose their board",
                   flush=True)
-            if len(text) >= 12:
-                print("  [vid  ] VERDICT: the VIDEO carries text the current "
-                      "summary never sees — board path only runs when ASR "
-                      "fails, so this lecture lost its board content",
-                      flush=True)
-                break
+        elif counts["screen"]:
+            print("  [vid  ] VERDICT: the video is a SCREEN recording "
+                  "(desktop/guide visible), not a blackboard capture — there "
+                  "is no board content to OCR in this lecture", flush=True)
+        elif total:
+            print("  [vid  ] VERDICT: sampled frames carry no OCR text "
+                  "(dark/talking-head view) — inconclusive for this position "
+                  "set; try another interval before concluding", flush=True)
         print("  [vid  ] (read-only: frames discarded, nothing persisted)",
               flush=True)
     except Exception as e:
         print(f"  [vid  ] probe failed: {type(e).__name__}: "
               f"{str(e)[:110]}", flush=True)
+    finally:
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _run_source_diag(client, db, reporter) -> None:
