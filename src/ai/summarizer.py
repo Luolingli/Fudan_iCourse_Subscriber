@@ -142,6 +142,25 @@ class Summarizer:
         return result
 
     def _chunk_content(self, content: str, max_len: int = 25000) -> list[str]:
+        """Split by lines, then merge slivers into their neighbour.
+
+        Line-based packing alone produces a degenerate leading chunk whenever
+        the first line is a short section header and the body is one enormous
+        line: the stored transcript is a single joined string, so the flat
+        prompt looks like
+
+            【音频转录（无时间轴）】\n<26349 chars of transcript, no newline>
+
+        and the packer emits ["【音频转录（无时间轴）】", "<26349 chars>"] — a
+        12-character first chunk.  The model receives a chunk containing only
+        a bare label, no lecture content, and dutifully answers "未提供课程
+        内容，无法总结" (observed in A/B run 39915429056: chunk 1/2 = 12
+        chars).  Those refusals then get joined into the delivered summary.
+
+        So after packing, fold any chunk that is too small to summarize on its
+        own into the next chunk.  Headers stay attached to the material they
+        introduce.
+        """
         if len(content) <= max_len:
             return [content]
         parts = []
@@ -159,7 +178,25 @@ class Summarizer:
                 cur_len += len(line)
         if cur:
             parts.append('\n'.join(cur))
-        return parts
+
+        # Fold slivers forward. A chunk under _MIN_CHUNK_CHARS carries only a
+        # header, so summarizing it in isolation can only produce a refusal.
+        _MIN_CHUNK_CHARS = 500
+        merged: list[str] = []
+        carry = ""
+        for part in parts:
+            part = part if not carry else f"{carry}\n{part}"
+            carry = ""
+            if len(part) < _MIN_CHUNK_CHARS:
+                carry = part
+                continue
+            merged.append(part)
+        if carry:
+            if merged:
+                merged[-1] = f"{merged[-1]}\n{carry}"
+            else:
+                merged = [carry]
+        return merged or [content]
 
     def _call_llm_chunked(self, client: OpenAI, model: str, title: str, content: str) -> str:
         chunks = self._chunk_content(content, max_len=25000)
