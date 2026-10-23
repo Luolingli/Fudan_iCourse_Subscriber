@@ -309,6 +309,12 @@ BOARD_FALLBACK = os.environ.get("BOARD_FALLBACK", "1").strip().lower() not in ("
 BOARD_FRAME_INTERVAL = int(os.environ.get("BOARD_FRAME_INTERVAL", "20"))
 # 单节最多送去 OCR 的板书帧数（去重后按时间等比截断）。
 BOARD_MAX_PAGES = int(os.environ.get("BOARD_MAX_PAGES", "320"))
+# 「平台页面文字少于此值 = 这节没有真课件」的判定阈（字符）。
+# 板书型课程（泛函/实变）的截图 feed 抓的是教室电脑屏幕（桌面 + 录像指南
+# 占位页），去重后 0 页，此时即便 ASR 成功也要从视频补板书（2026-10-23
+# 读数：686005 feed 1931 页全噪音，而视频帧 8/8 是 §2.3 Hahn-Banach 板书）。
+# 调大 → 更容易触发补板书（更慢更全）；调小/置 0 → 只在完全无文字时补。
+BOARD_TEXT_MIN_CHARS = int(os.environ.get("BOARD_TEXT_MIN_CHARS", "300"))
 
 # ── 音轨验货闸（readiness gate）──────────────────────────────────────────
 # 处理新课前，先对每个视频候选（含 /play/1/ 播放口路径）抽两段短窗实测音频

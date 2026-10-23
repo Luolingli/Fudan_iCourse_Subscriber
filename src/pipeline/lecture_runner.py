@@ -303,6 +303,44 @@ class LectureRunner:
             next_course, next_sub = next_info
             self._ppt.prefetch_and_ocr(self._client, next_course, next_sub)
 
+        # ── Phase E3 — board supplement for a GOOD transcript ──────────
+        # Board-writing courses (泛函分析/实变函数, same teacher) are taught
+        # on a physical blackboard with no slides, and the platform's
+        # screenshot feed for them is the classroom PC screen — desktop and
+        # 录像指南 guide page — so every OCR'd "page" is noise and dedup
+        # correctly drops all of it.  Verified on 686005 (2026-10-23
+        # read-only diagnostic): feed pages=1931 @5s cadence, all 8 sampled
+        # discarded pages junk, while 8/8 frames sampled straight from the
+        # VIDEO were blackboard text (§2.3 Hahn-Banach, Def/Thm/Cor 2.3.x).
+        #
+        # Until now the board path ran ONLY when ASR failed, so any lecture
+        # with a working audio track silently lost its board: the summary
+        # was built from audio alone and nothing anywhere said so.  When a
+        # transcript exists but the platform yielded no real page text, the
+        # board frames are the missing half of the lecture — fetch them and
+        # let the bucketer interleave them by timestamp.
+        if (config.BOARD_FALLBACK and transcript.strip()):
+            existing_text = "\n".join(
+                p.get("text", "") for p in self._kept_pages(sub_id)
+            ).strip()
+            if len(existing_text) < config.BOARD_TEXT_MIN_CHARS:
+                self._reporter.info(
+                    f"    [Board] platform page text only "
+                    f"{len(existing_text)} chars — board-writing lecture, "
+                    f"fetching board frames from video for the supplement."
+                )
+                recovered = self._board_from_video(course_id, sub_id, date)
+                if recovered:
+                    self._pages_cache.pop(sub_id, None)
+                    new_text = "\n".join(
+                        p.get("text", "") for p in self._kept_pages(sub_id)
+                    ).strip()
+                    self._reporter.info(
+                        f"    [Board] supplemented summary with "
+                        f"{recovered} board page(s), "
+                        f"{len(new_text)} chars of board text."
+                    )
+
         # ── Phase F — bucketed-prompt LLM summary ──────────────────────
         # An empty transcript is a failure, not a terminal state: it can
         # come from a broken or flaky ASR pass.  Never mark_processed here
