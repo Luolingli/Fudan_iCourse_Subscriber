@@ -362,6 +362,15 @@ AB_MODEL = os.environ.get("AB_MODEL", "").strip()
 # 只读审计：DIAG_SOURCE_IDS 里每讲只读本地 DB，打印
 # transcript/summary/slides/boards 四列，不做任何网络探测。
 # 用途：判断"哪些讲缺板书"，避免为一次盘点去下载视频。
+# 非破坏性"补板书 + 只重生成摘要"：只写回 summary/summary_model，
+# 不动 transcript / emailed_at / error_* / ppt_pages 的处理状态。
+# 用于已交付但缺板书的老讲次（force_sub_ids 会清转录重新 ASR，代价不必付）。
+RESUMMARY_IDS = [
+    s.strip()
+    for s in os.environ.get("RESUMMARY_IDS", "").split(",")
+    if s.strip()
+]
+
 DIAG_AUDIT_ONLY = os.environ.get(
     "DIAG_AUDIT_ONLY", "").strip().lower() in ("1", "true", "yes")
 

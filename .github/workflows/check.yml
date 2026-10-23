@@ -27,6 +27,11 @@ on:
         required: false
         default: ""
         type: string
+      resummary_ids:
+        description: "NON-DESTRUCTIVE board back-fill: re-summarize these sub_ids from their EXISTING transcript + board OCR, updating only summary (transcript/emailed state untouched)"
+        required: false
+        default: ""
+        type: string
       ab_model:
         description: "Pin BOTH A/B arms to one provider/model (e.g. deepseek/deepseek-flash) so the delta measures the board, not the model. Empty = production fallback chain"
         required: false
@@ -199,6 +204,7 @@ jobs:
           DIAG_SOURCE_IDS: ${{ github.event.inputs.diag_source_ids }}
           AB_SUMMARY_IDS: ${{ github.event.inputs.ab_summary_ids }}
           AB_MODEL: ${{ github.event.inputs.ab_model }}
+          RESUMMARY_IDS: ${{ github.event.inputs.resummary_ids }}
           SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}

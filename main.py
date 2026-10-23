@@ -776,6 +776,75 @@ def _run_asr_probes(transcriber, reporter) -> None:
             )
 
 
+_BOARD_PAGE_NUM_BASE = 10000
+
+# Every dash a board OCR or an LLM might use for "Hahn-Banach".
+_DASH_VARIANTS = ("\u2010", "\u2011", "\u2012", "\u2013",
+                  "\u2014", "\u2015", "\u2212", "\uff0d")
+
+
+def _norm_text(s: str) -> str:
+    """Fold dash variants so comparisons survive typography.
+
+    Board OCR yields "Hahn-Banach" (ASCII hyphen); a summary writes
+    "Hahn–Banach" (en dash) or "Hahn - Banach". Comparing the raw strings
+    scored both arms as missing the term even though both discussed it.
+    """
+    import re as _re
+    s = (s or "").lower()
+    for dash in _DASH_VARIANTS:
+        s = s.replace(dash, "-")
+    return _re.sub(r"\s*-\s*", "-", s)
+
+
+def _split_page_kinds(rows):
+    """Split ppt_pages rows into (platform slides, video board frames).
+
+    Board frames are synthetic rows with page_num >= 10000; a real platform
+    screenshot never reaches that number. Both live in the same table, so
+    every consumer that needs "was the board read?" must split on this.
+    """
+    slides, boards = [], []
+    for p in rows or []:
+        try:
+            num = int(p.get("page_num") or 0)
+        except (TypeError, ValueError):
+            num = 0
+        (boards if num >= _BOARD_PAGE_NUM_BASE else slides).append(p)
+    return slides, boards
+
+
+def _page_text(rows) -> str:
+    return "\n".join((p.get("text") or "") for p in rows or []).strip()
+
+
+def _board_terms(board_text: str, limit: int = 18) -> list[str]:
+    """Proper names / theorem names appearing on the board.
+
+    These are exactly what ASR mangles ("Hahn-Bamaeh") or omits, and what only
+    the board gets right — so coverage of them is the measurable signal.
+    """
+    import re as _re
+    stop = {"thm", "def", "cor", "sup", "inf", "theorem", "definition",
+            "lem", "prop", "proof"}
+    return sorted({t for t in _re.findall(r"[A-Za-z][A-Za-z\-]{3,}", board_text)
+                   if t.lower() not in stop})[:limit]
+
+
+def _board_markers(board_text: str) -> list[str]:
+    """Section/theorem numbering that exists only on the board."""
+    import re as _re
+    return sorted({m for m in _re.findall(
+        r"(?:\u00a7\s*\d+(?:\.\d+)*|(?:Thm|Def|Cor|Lem|Prop)\.?\s*"
+        r"\d+\.\d+(?:\.\d+)?)", board_text)})
+
+
+def _coverage(text: str, needles: list[str]) -> list[str]:
+    """Which needles survive into ``text`` (after dash folding)."""
+    low = _norm_text(text)
+    return [n for n in needles if _norm_text(n) in low]
+
+
 def _run_ab_summary(client, db, reporter) -> None:
     """A/B a lecture's summary with and without board OCR — measures what the
     blackboard actually adds, instead of asserting it.
@@ -907,34 +976,11 @@ def _run_ab_summary(client, db, reporter) -> None:
             # many the summary actually captured is the measurable signal.
             # (2) Section-structure coverage: board lectures are organized
             # by §/Def/Thm/Cor numbering that only exists on the board.
-            terms = sorted({t for t in _re.findall(
-                r"[A-Za-z][A-Za-z\-]{3,}", board_text)
-                if t.lower() not in ("thm", "def", "cor", "sup", "inf",
-                                     "theorem", "definition")})[:18]
+            terms = _board_terms(board_text)
 
-            # OCR writes "Hahn-Banach" (ASCII hyphen) while an LLM summary
-            # writes "Hahn–Banach" (en dash) — and may space the hyphen
-            # ("Hahn - Banach"). Matching the raw strings undercounts both
-            # arms; normalize every dash variant and surrounding spaces on
-            # BOTH sides before comparing.
-            def _norm(s: str) -> str:
-                s = s.lower()
-                for dash in ("\u2010", "\u2011", "\u2012", "\u2013",
-                             "\u2014", "\u2015", "\u2212", "\uff0d"):
-                    s = s.replace(dash, "-")
-                s = _re.sub(r"\s*-\s*", "-", s)
-                return s
-
-            def _hits(summary, terms):
-                low = _norm(summary)
-                return [t for t in terms if _norm(t) in low]
-
-            markers = sorted({
-                m for m in _re.findall(
-                    r"(?:§\s*\d+(?:\.\d+)*|(?:Thm|Def|Cor|Lem|Prop)\.?\s*"
-                    r"\d+\.\d+(?:\.\d+)?)", board_text)})
-            ha, hb = _hits(arm_a, terms), _hits(arm_b, terms)
-            ma, mb = _hits(arm_a, markers), _hits(arm_b, markers)
+            markers = _board_markers(board_text)
+            ha, hb = _coverage(arm_a, terms), _coverage(arm_b, terms)
+            ma, mb = _coverage(arm_a, markers), _coverage(arm_b, markers)
             print(f"  [ab   ] delta: {len(arm_b) - len(arm_a):+d} chars "
                   f"({(len(arm_b) / max(len(arm_a), 1) - 1):+.0%})", flush=True)
             print(f"  [ab   ] board-term coverage: A={len(ha)}/"
@@ -951,6 +997,134 @@ def _run_ab_summary(client, db, reporter) -> None:
 
 
 _summ_singleton = None
+
+
+
+def _run_resummary(client, db, reporter) -> None:
+    """Non-destructive board back-fill for ALREADY-DELIVERED lectures.
+
+    Re-summarizes an existing transcript together with board OCR, writing back
+    ONLY summary/summary_model.  Deliberately not force_sub_ids:
+
+      force_reset_lecture wipes transcript, emailed_at and every ppt_pages row,
+      which forces a full ASR re-run of lectures whose transcript is already
+      correct and already emailed.  The only thing these lectures are missing
+      is the blackboard, so re-transcribing them buys nothing and risks the
+      one artifact that is actually hard to reproduce.
+
+    Comparison is controlled: both versions are produced in the SAME assembly
+    mode (flat — segment timings are not persisted, so a bucketed prompt is
+    impossible here) on the SAME model, one with and one without board rows.
+    The delta is therefore attributable to the board, not to a mode or model
+    change.  The board version is what gets persisted.
+    """
+    import time as _time
+    from src.ai import bucketer
+
+    _summ = _get_summarizer()
+    _pin_model(_summ, config.AB_MODEL)
+
+    scheduler = Scheduler(reporter=reporter)
+    try:
+        runner = LectureRunner(client, db, scheduler, None, None, reporter)
+        runner._last_media_duration = None
+        for sid in config.RESUMMARY_IDS:
+            sid = str(sid).strip()
+            row = db.get_lecture(sid)
+            if not row:
+                print(f"  [re  ] {sid}: not in DB — skip", flush=True)
+                continue
+            transcript = (row.get("transcript") or "").strip()
+            old_summary = (row.get("summary") or "").strip()
+            title = str(row.get("sub_title") or sid)
+            print(f"\n=== RESUM {sid} course={row.get('course_id')} "
+                  f"title={title} ===", flush=True)
+            print(f"  [re  ] existing: transcript={len(transcript)} chars, "
+                  f"summary={len(old_summary)} chars", flush=True)
+            if not transcript:
+                print("  [re  ] no transcript in DB — refusing to invent a "
+                      "summary (use force_sub_ids if it truly needs ASR)",
+                      flush=True)
+                continue
+
+            slides, boards = _split_page_kinds(db.get_done_ppt_pages(sid))
+            slide_text = _page_text(slides)
+            board_text = _page_text(boards)
+            print(f"  [re  ] pages: slides={len(slides)}p/{len(slide_text)}c, "
+                  f"board={len(boards)}p/{len(board_text)}c", flush=True)
+
+            # Fetch the board only when this lecture looks like a board course
+            # and has none yet (open-cover makes a second attempt cheap).
+            if not board_text and config.BOARD_FALLBACK:
+                if len(slide_text) < config.BOARD_TEXT_MIN_CHARS:
+                    t0 = _time.time()
+                    try:
+                        runner._board_from_video(
+                            str(row.get("course_id") or ""), sid,
+                            str(row.get("date") or ""))
+                    except Exception as e:
+                        print(f"  [re  ] board extraction failed: "
+                              f"{type(e).__name__}: {str(e)[:110]}",
+                              flush=True)
+                    slides, boards = _split_page_kinds(
+                        db.get_done_ppt_pages(sid))
+                    board_text = _page_text(boards)
+                    print(f"  [re  ] board after extraction: "
+                          f"{len(boards)}p/{len(board_text)}c in "
+                          f"{_time.time() - t0:.0f}s", flush=True)
+            if not board_text:
+                print("  [re  ] no board text available — leaving the "
+                      "existing summary untouched (nothing to add)", flush=True)
+                continue
+
+            # Same mode, same model, one variable: the board rows.
+            prompt_base, mode = bucketer.assemble(transcript, [], slides)
+            prompt_board, _ = bucketer.assemble(transcript, [],
+                                               slides + boards)
+            print(f"  [re  ] prompt: base={len(prompt_base)}c "
+                  f"board={len(prompt_board)}c mode={mode}", flush=True)
+
+            base = ""
+            try:
+                base, model_base = _summ.summarize(title, prompt_base)
+            except Exception as e:
+                print(f"  [re  ] baseline summarize failed: "
+                      f"{type(e).__name__}: {str(e)[:110]}", flush=True)
+            try:
+                new_summary, model_new = _summ.summarize(title, prompt_board)
+            except Exception as e:
+                print(f"  [re  ] board summarize failed: "
+                      f"{type(e).__name__}: {str(e)[:110]} — keeping the "
+                      f"existing summary", flush=True)
+                continue
+
+            terms = _board_terms(board_text)
+            markers = _board_markers(board_text)
+            h_base, h_new = _coverage(base, terms), _coverage(new_summary, terms)
+            m_base = _coverage(base, markers)
+            m_new = _coverage(new_summary, markers)
+            print(f"  [re  ] summary: old(as delivered)={len(old_summary)}c "
+                  f"-> new={len(new_summary)}c", flush=True)
+            print(f"  [re  ] controlled (same mode/model): "
+                  f"base={len(base)}c -> board={len(new_summary)}c "
+                  f"({len(new_summary) - len(base):+d}c)", flush=True)
+            print(f"  [re  ] vs delivered: "
+                  f"{len(new_summary) - len(old_summary):+d}c", flush=True)
+            print(f"  [re  ] board-term coverage: base={len(h_base)}/"
+                  f"{len(terms)} board={len(h_new)}/{len(terms)}", flush=True)
+            print(f"  [re  ] board-section coverage: base={len(m_base)}/"
+                  f"{len(markers)} board={len(m_new)}/{len(markers)}",
+                  flush=True)
+            print(f"  [re  ] terms only board captured: "
+                  f"{[t for t in h_new if t not in h_base][:10]}", flush=True)
+
+            db.update_summary(sid, new_summary, model_new)
+            print(f"  [re  ] SAVED summary ({model_new}) — transcript, "
+                  f"flags and email state untouched", flush=True)
+            print(f"  [re  ] --- new summary head ---\n"
+                  f"{new_summary[:300]}", flush=True)
+    finally:
+        scheduler.shutdown()
 
 
 def _get_summarizer():
@@ -1031,6 +1205,12 @@ def run():
         # both stacks + official-transcript availability, then stop — no
         # lecture processing this run (DB untouched → commit skipped).
         _run_source_diag(client, db, reporter)
+        return
+
+    if config.RESUMMARY_IDS:
+        # Non-destructive board back-fill: rewrite summary only, never the
+        # transcript, never the emailed state.
+        _run_resummary(client, db, reporter)
         return
 
     if config.AB_SUMMARY_IDS:
