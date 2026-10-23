@@ -21,6 +21,7 @@ from src.runtime import config
 from src.data.database import Database
 from src.api.emailer import Emailer
 from src.api.icourse import ICourseClient, fetch_ppt_image
+from src.ai.ocr import ocr_image_text
 from src.pipeline.lecture_runner import LectureRunner
 from src.runtime.reporter import Reporter
 from src.runtime.scheduler import Scheduler
@@ -304,7 +305,6 @@ def _probe_ppt_feed(client, sid: str, row: dict | None = None) -> None:
         from src.ai.ppt_dedup_config import (
             DHASH_THRESHOLD, DHASH_MAX_SURVIVORS,
         )
-        from src.ai.ocr import ocr_image_text
 
         items = client.get_ppt_list(
             str((row or {}).get("course_id") or ""), sid)
@@ -416,7 +416,7 @@ def _probe_ppt_feed(client, sid: str, row: dict | None = None) -> None:
             print("  [ppt  ] NOTE: dedup drops EVERY feed page — the "
                   "screenshot job captured the PC screen, not slides",
                   flush=True)
-        elif median_gap and 4 <= med_gap <= 6 and kept / max(fetched, 1) < 0.1:
+        elif med_gap and 4 <= med_gap <= 6 and kept / max(fetched, 1) < 0.1:
             print("  [ppt  ] NOTE: camera-cadence feed ("
                   f"{med_gap:.0f}s/page) keeps only "
                   f"{kept / max(fetched, 1):.0%} of sampled pages",
