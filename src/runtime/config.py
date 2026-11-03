@@ -59,6 +59,18 @@ MODEL_PROVIDERS: list[dict] = [
         ],
     },
     {
+        # 第二个 ModelScope key（双 key 兜底：主 key 429 余额耗尽时切换，避免过早落到付费 DeepSeek）
+        "name": "modelscope2",
+        "api_key_env": "DASHSCOPE_API_KEY_2",
+        "base_url_env": "DASHSCOPE_BASE_URL",
+        "default_base_url": "https://api-inference.modelscope.cn/v1/",
+        "models": [
+            "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+            "deepseek-ai/DeepSeek-V4-Pro-0813",
+            "Qwen/Qwen3.5-397B-A17B",
+        ],
+    },
+    {
         # 首选 modelscope 余额耗尽时（429 insufficient_balance）自动降级到这里。
         "name": "deepseek",
         "api_key_env": "DEEPSEEK_API_KEY",
@@ -135,6 +147,7 @@ def resolve_model_providers() -> list[dict]:
 
 # Legacy compatibility shims (kept so other modules importing these don't break)
 DASHSCOPE_API_KEY = os.environ.get("DASHSCOPE_API_KEY", "")
+DASHSCOPE_API_KEY_2 = os.environ.get("DASHSCOPE_API_KEY_2", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 # QQ SMTP (can be overridden for custom SMTP providers)
