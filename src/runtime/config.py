@@ -210,9 +210,10 @@ ASR_BACKEND = os.environ.get("ASR_BACKEND", "sensevoice").strip().lower()
 ASR_NUM_THREADS = int(os.environ.get("ASR_NUM_THREADS", "4"))
 
 # ── Scheduler concurrency knobs.  All overridable via env. ────────────────
-# image_pool: image downloads are tiny and IO-bound, 20 saturates bandwidth
-# without hammering the iCourse server.
-IMAGE_WORKERS = int(os.environ.get("IMAGE_WORKERS", "20"))
+# image_pool: image downloads are tiny and IO-bound. Default 6 workers
+# avoids flooding the WebVPN reverse-proxy connection pool and triggering CDN
+# rate-limiting/burst-refusal windows while streaming audio.
+IMAGE_WORKERS = int(os.environ.get("IMAGE_WORKERS", "6"))
 # OCR pool: pool size is the hard ceiling; a fixed BoundedSemaphore(OCR_MAX_TARGET)
 # gates live concurrency since RapidOCR is single-threaded CPU-bound.
 OCR_MAX_WORKERS = int(os.environ.get("OCR_MAX_WORKERS", "8"))

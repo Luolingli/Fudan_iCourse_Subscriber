@@ -279,8 +279,15 @@ class LectureRunner:
                         sub_id, course_title, "", [],
                     )
                     if summary:
-                        self._db.mark_processed(sub_id)
-                        self._db.clear_error(sub_id)
+                        existing_err = (self._db.get_lecture(sub_id) or {}).get("error_stage")
+                        if existing_err != "transcribe":
+                            self._db.mark_processed(sub_id)
+                            self._db.clear_error(sub_id)
+                        else:
+                            self._reporter.info(
+                                "    [Board] board-only summary generated; "
+                                "keeping lecture retriable for ASR recovery."
+                            )
                         self._release_audio(sub_id)
                         elapsed = time.time() - t_start
                         self._reporter.lecture_done(
@@ -644,14 +651,15 @@ class LectureRunner:
         if next_info is None:
             return
         next_course, next_sub = next_info
-        # Image prefetch is always useful; the audio download — a full
-        # ffmpeg pull of the lecture — only when the next lecture will
-        # actually be ASR-transcribed.  Both are idempotent so repeated
-        # invocations are no-ops; the audio side blocks on its semaphore
-        # until a download slot frees.
+        # Image prefetch is always useful. Audio is deliberately NOT
+        # prefetched across lectures: starting an ffmpeg stream before Phase A3
+        # causes a multi-stream collision when Phase A3's Gate probe opens
+        # another ffmpeg stream against the same WebVPN session/CDN token,
+        # which triggers WebVPN 403 burst refusals. Scheduling audio strictly
+        # in Phase D after Gate probe succeeds guarantees single-stream purity.
         self._scheduler.prefetch_lecture(
             self._client, next_course, next_sub,
-            audio=self._needs_audio(next_sub),
+            audio=False,
         )
 
     def _needs_audio(self, sub_id: str) -> bool:
@@ -820,83 +828,104 @@ class LectureRunner:
                 "    [Gate] ASR streams the live-audio variant "
                 "chosen by the probe"
             )
-        downloader.schedule(self._client, course_id, sub_id,
-                            url=chosen_video)
-        try:
-            handle = downloader.get(sub_id, timeout=120)
-        except (TimeoutError, RuntimeError) as e:
-            # RuntimeError = spawn recorded a lookup/startup failure
-            # (upstream PR #50) — retryable transcribe error, never the
-            # gray "no video" verdict.  Release clears any leftover token.
-            self._reporter.info(f"    [SKIP] {e}")
-            self._db.update_error(sub_id, "transcribe", str(e))
-            self._release_audio(sub_id)
-            return None, None
-        if handle is None:
-            # AudioDownloader returns None when get_video_url() returned
-            # None — i.e. the lecture has no playable video.  Record an
-            # error so the lecture is retried (the video may appear later)
-            # but abandoned after max_errors instead of every day forever.
-            # The "no_video" stage is a contract with the frontend, which
-            # renders it as a gray "无视频" hint instead of a red failure.
-            self._reporter.lecture_skip_no_video(
-                existing.get("sub_title", sub_id) if existing else sub_id
-            )
-            self._db.update_error(sub_id, "no_video", "no playable video URL")
-            return None, None
-
-        try:
-            transcript, segments = self._transcriber.transcribe_tail(
-                handle.path, handle.process, handle.stderr_chunks,
-            )
-        except NoAudioStreamError as e:
-            # Upstream PR #48: do NOT mark_processed — a video-only MP4 is
-            # usually a broken school upload that later gets replaced;
-            # keeping the retriable error lets it recover, and the
-            # abandoned/error-cap filter already bounds the retries.
-            self._reporter.info(f"    [SKIP] Video-only (no audio stream): {e}")
-            self._db.update_error(sub_id, "transcribe", str(e))
-            self._release_audio(sub_id)
-            return None, None
-        except IncompleteAudioError as e:
-            # Truncated download (ffmpeg may even exit 0 on a server-side
-            # cut).  Don't persist the partial transcript — it would
-            # short-circuit the retry — just record the error so the
-            # lecture is retried up to max_errors times.
-            self._reporter.info(
-                f"    [SKIP] Incomplete audio, will retry next run: {e}"
-            )
-            self._db.update_error(sub_id, "transcribe", str(e))
-            self._release_audio(sub_id)
-            return None, None
-        except RuntimeError as e:
-            # Transport refusals (CDN 403/429 rate-limit windows, e.g. the
-            # cooldown after a day of burst force-runs) used to propagate
-            # out of run() and strand the lecture with the board fallback
-            # never attempted (v2 digest: [Board] hits 0).  Route them
-            # exactly like incomplete audio: retriable error + None lets
-            # the caller's board fallback decide this very run.
-            msg = str(e)
-            if ("403" in msg or "429" in msg or "HTTP error" in msg
-                    or "rc=8" in msg):
-                self._reporter.info(
-                    f"    [SKIP] audio pull refused "
-                    f"(transport window): {msg[-140:]}"
-                )
-                self._db.update_error(
-                    sub_id, "transcribe",
-                    "audio stream refused (403/429 window)",
-                )
+        transcript, segments = None, None
+        max_pull_attempts = 2
+        for pull_attempt in range(1, max_pull_attempts + 1):
+            downloader.schedule(self._client, course_id, sub_id,
+                                url=chosen_video)
+            try:
+                handle = downloader.get(sub_id, timeout=120)
+            except (TimeoutError, RuntimeError) as e:
+                # RuntimeError = spawn recorded a lookup/startup failure
+                # (upstream PR #50) — retryable transcribe error.
+                msg = str(e)
+                if ("403" in msg or "429" in msg or "HTTP error" in msg
+                        or "rc=8" in msg) and pull_attempt < max_pull_attempts:
+                    self._reporter.info(
+                        f"    [Retry] audio pull refused ({msg[-80:]}), "
+                        f"backing off 8s before retry {pull_attempt + 1}..."
+                    )
+                    self._release_audio(sub_id)
+                    time.sleep(8)
+                    continue
+                self._reporter.info(f"    [SKIP] {e}")
+                self._db.update_error(sub_id, "transcribe", str(e))
                 self._release_audio(sub_id)
                 return None, None
-            raise
-        except Exception as e:
-            self._reporter.info(
-                f"    [FAIL] Transcription error: {type(e).__name__}: {e}"
-            )
-            self._db.update_error(sub_id, "transcribe", str(e))
-            self._release_audio(sub_id)
-            raise
+            if handle is None:
+                # AudioDownloader returns None when get_video_url() returned
+                # None — i.e. the lecture has no playable video.  Record an
+                # error so the lecture is retried (the video may appear later)
+                # but abandoned after max_errors instead of every day forever.
+                # The "no_video" stage is a contract with the frontend, which
+                # renders it as a gray "无视频" hint instead of a red failure.
+                self._reporter.lecture_skip_no_video(
+                    existing.get("sub_title", sub_id) if existing else sub_id
+                )
+                self._db.update_error(sub_id, "no_video", "no playable video URL")
+                return None, None
+
+            try:
+                transcript, segments = self._transcriber.transcribe_tail(
+                    handle.path, handle.process, handle.stderr_chunks,
+                )
+                break
+            except NoAudioStreamError as e:
+                # Upstream PR #48: do NOT mark_processed — a video-only MP4 is
+                # usually a broken school upload that later gets replaced;
+                # keeping the retriable error lets it recover, and the
+                # abandoned/error-cap filter already bounds the retries.
+                self._reporter.info(f"    [SKIP] Video-only (no audio stream): {e}")
+                self._db.update_error(sub_id, "transcribe", str(e))
+                self._release_audio(sub_id)
+                return None, None
+            except IncompleteAudioError as e:
+                # Truncated download (ffmpeg may even exit 0 on a server-side
+                # cut).  Don't persist the partial transcript — it would
+                # short-circuit the retry — just record the error so the
+                # lecture is retried up to max_errors times.
+                self._reporter.info(
+                    f"    [SKIP] Incomplete audio, will retry next run: {e}"
+                )
+                self._db.update_error(sub_id, "transcribe", str(e))
+                self._release_audio(sub_id)
+                return None, None
+            except RuntimeError as e:
+                # Transport refusals (CDN 403/429 rate-limit windows, e.g. the
+                # cooldown after a day of burst force-runs) used to propagate
+                # out of run() and strand the lecture with the board fallback
+                # never attempted (v2 digest: [Board] hits 0).  Route them
+                # exactly like incomplete audio: retriable error + None lets
+                # the caller's board fallback decide this very run.
+                msg = str(e)
+                if ("403" in msg or "429" in msg or "HTTP error" in msg
+                        or "rc=8" in msg):
+                    if pull_attempt < max_pull_attempts:
+                        self._reporter.info(
+                            f"    [Retry] audio stream cut ({msg[-80:]}), "
+                            f"backing off 8s before retry {pull_attempt + 1}..."
+                        )
+                        self._release_audio(sub_id)
+                        time.sleep(8)
+                        continue
+                    self._reporter.info(
+                        f"    [SKIP] audio pull refused "
+                        f"(transport window): {msg[-140:]}"
+                    )
+                    self._db.update_error(
+                        sub_id, "transcribe",
+                        "audio stream refused (403/429 window)",
+                    )
+                    self._release_audio(sub_id)
+                    return None, None
+                raise
+            except Exception as e:
+                self._reporter.info(
+                    f"    [FAIL] Transcription error: {type(e).__name__}: {e}"
+                )
+                self._db.update_error(sub_id, "transcribe", str(e))
+                self._release_audio(sub_id)
+                raise
 
         # A full-length download that transcribes to zero speech usually
         # means iCourse served a broken transcode (dead audio track) for
