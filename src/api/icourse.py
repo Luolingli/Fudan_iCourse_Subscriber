@@ -46,8 +46,8 @@ def fetch_ppt_image(client: "ICourseClient", item: dict,
                 resp = client.vpn.get(url, timeout=timeout)
             resp.raise_for_status()
             content = resp.content
-            if content.startswith((b"<!DOCTYPE", b"<html", b"<head")):
-                if attempt < max_attempts and client.refresh_session_if_needed():
+            if content.startswith((b"<!DOCTYPE", b"<!doctype", b"<html", b"<head")):
+                if attempt < max_attempts and client.refresh_session_if_needed(force=True):
                     continue
                 raise RuntimeError("Image URL returned HTML login page instead of image bytes")
             return content
@@ -79,9 +79,9 @@ class ICourseClient:
         except Exception:
             return False
 
-    def refresh_session_if_needed(self) -> bool:
+    def refresh_session_if_needed(self, force: bool = False) -> bool:
         """If session expired and a refresh callback is registered, refresh."""
-        if not self.check_alive():
+        if force or not self.check_alive():
             if self._session_refresh_cb:
                 self._session_refresh_cb()
                 return True
@@ -92,10 +92,11 @@ class ICourseClient:
         for attempt in range(1, 3):
             resp = self.vpn.get(url, **kwargs)
             resp.raise_for_status()
-            ctype = resp.headers.get("Content-Type", "").lower()
             text = resp.text.strip()
-            if "html" in ctype or text.startswith(("<!DOCTYPE", "<html", "<head")):
-                if attempt < 2 and self.refresh_session_if_needed():
+            # If the response starts with HTML markup, the WebVPN/CAS session has expired
+            if text.startswith(("<", "<!DOCTYPE", "<!doctype", "<html", "<head")):
+                print(f"[ICourseClient] API {url} returned HTML login redirect (attempt {attempt}/2)", flush=True)
+                if attempt < 2 and self.refresh_session_if_needed(force=True):
                     continue
                 raise RuntimeError(
                     f"API {url} returned HTML login page instead of JSON (session expired)"
@@ -103,7 +104,8 @@ class ICourseClient:
             try:
                 return resp.json()
             except (json.JSONDecodeError, ValueError) as e:
-                if attempt < 2 and self.refresh_session_if_needed():
+                print(f"[ICourseClient] API {url} JSON decode failed: {e} (attempt {attempt}/2)", flush=True)
+                if attempt < 2 and self.refresh_session_if_needed(force=True):
                     continue
                 raise RuntimeError(
                     f"API {url} response JSON decode failed: {e}; preview: {text[:100]}"
