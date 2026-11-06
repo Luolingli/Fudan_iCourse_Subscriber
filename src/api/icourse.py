@@ -6,10 +6,12 @@ and video downloads through WebVPN.
 """
 
 import hashlib
+import json
 import os
 import re
 import time
 import uuid
+from typing import Callable, Optional
 from urllib.parse import urlparse
 
 from src.runtime import config
@@ -43,7 +45,12 @@ def fetch_ppt_image(client: "ICourseClient", item: dict,
             else:
                 resp = client.vpn.get(url, timeout=timeout)
             resp.raise_for_status()
-            return resp.content
+            content = resp.content
+            if content.startswith((b"<!DOCTYPE", b"<html", b"<head")):
+                if attempt < max_attempts and client.refresh_session_if_needed():
+                    continue
+                raise RuntimeError("Image URL returned HTML login page instead of image bytes")
+            return content
         except Exception as e:
             print(f"[PPTFetcher] download failed (attempt "
                   f"{attempt}/{max_attempts}): {type(e).__name__}: {e}")
@@ -55,29 +62,12 @@ def fetch_ppt_image(client: "ICourseClient", item: dict,
 class ICourseClient:
     """Client for the iCourse API, operating through WebVPN."""
 
-    def __init__(self, vpn_session: WebVPNSession):
+    def __init__(self, vpn_session: WebVPNSession,
+                 session_refresh_cb: Optional[Callable[[], None]] = None):
         self.vpn = vpn_session
         self.base_url = config.ICOURSE_BASE
         self._userinfo = None
-
-    def get_userinfo(self) -> dict:
-        """Get current user info (id, tenant_id, phone, account).
-
-        Caches the result for the session.
-        """
-        if self._userinfo is not None:
-            return self._userinfo
-
-        url = f"{self.base_url}/userapi/v1/infosimple"
-        resp = self.vpn.get(url)
-        resp.raise_for_status()
-        data = resp.json()
-
-        if data.get("code") not in (0, 200):
-            raise RuntimeError(f"Failed to get userinfo: {data.get('msg')}")
-
-        self._userinfo = data.get("params") or data.get("data", {})
-        return self._userinfo
+        self._session_refresh_cb = session_refresh_cb
 
     def check_alive(self) -> bool:
         """Quick session health check (non-cached)."""
@@ -88,6 +78,53 @@ class ICourseClient:
             return resp.status_code == 200 and resp.json().get("code") in (0, 200)
         except Exception:
             return False
+
+    def refresh_session_if_needed(self) -> bool:
+        """If session expired and a refresh callback is registered, refresh."""
+        if not self.check_alive():
+            if self._session_refresh_cb:
+                self._session_refresh_cb()
+                return True
+        return False
+
+    def get_json(self, url: str, **kwargs) -> dict:
+        """GET request returning parsed JSON, auto-refreshing session on HTML/expiration."""
+        for attempt in range(1, 3):
+            resp = self.vpn.get(url, **kwargs)
+            resp.raise_for_status()
+            ctype = resp.headers.get("Content-Type", "").lower()
+            text = resp.text.strip()
+            if "html" in ctype or text.startswith(("<!DOCTYPE", "<html", "<head")):
+                if attempt < 2 and self.refresh_session_if_needed():
+                    continue
+                raise RuntimeError(
+                    f"API {url} returned HTML login page instead of JSON (session expired)"
+                )
+            try:
+                return resp.json()
+            except (json.JSONDecodeError, ValueError) as e:
+                if attempt < 2 and self.refresh_session_if_needed():
+                    continue
+                raise RuntimeError(
+                    f"API {url} response JSON decode failed: {e}; preview: {text[:100]}"
+                )
+
+    def get_userinfo(self) -> dict:
+        """Get current user info (id, tenant_id, phone, account).
+
+        Caches the result for the session.
+        """
+        if self._userinfo is not None:
+            return self._userinfo
+
+        url = f"{self.base_url}/userapi/v1/infosimple"
+        data = self.get_json(url)
+
+        if data.get("code") not in (0, 200):
+            raise RuntimeError(f"Failed to get userinfo: {data.get('msg')}")
+
+        self._userinfo = data.get("params") or data.get("data", {})
+        return self._userinfo
 
     def sign_video_url(
         self, video_url: str, now: int | None = None
@@ -124,9 +161,7 @@ class ICourseClient:
         Each lecture has: sub_id, sub_title, lecturer_name, date, has_playback
         """
         url = f"{self.base_url}/courseapi/v3/multi-search/get-course-detail"
-        resp = self.vpn.get(url, params={"course_id": course_id})
-        resp.raise_for_status()
-        data = resp.json()
+        data = self.get_json(url, params={"course_id": course_id})
 
         if data.get("code") != 0:
             raise RuntimeError(
@@ -188,15 +223,13 @@ class ICourseClient:
         page = 1
         while True:
             url = f"{self.base_url}/pptnote/v1/schedule/search-ppt"
-            resp = self.vpn.get(
+            data = self.get_json(
                 url,
                 params={
                     "course_id": course_id, "sub_id": sub_id,
                     "page": page, "per_page": per_page,
                 },
             )
-            resp.raise_for_status()
-            data = resp.json()
             if data.get("code") != 0:
                 raise RuntimeError(f"search-ppt failed: {data.get('msg')}")
             page_items = data.get("list", [])
@@ -247,9 +280,7 @@ class ICourseClient:
             if not val:
                 continue
             params[key] = val
-        resp = self.vpn.get(url, params=params)
-        resp.raise_for_status()
-        data = resp.json()
+        data = self.get_json(url, params=params)
 
         if data.get("code") != 0:
             raise RuntimeError(f"API error: {data.get('msg')}")
@@ -444,11 +475,9 @@ class ICourseClient:
         Sorted by start_ms ascending.
         """
         url = f"{self.base_url}/courseapi/v3/web-socket/search-trans-result"
-        resp = self.vpn.get(
+        data = self.get_json(
             url, params={"sub_id": sub_id, "format": "json"}
         )
-        resp.raise_for_status()
-        data = resp.json()
 
         if data.get("code") != 0:
             return None
@@ -482,11 +511,9 @@ class ICourseClient:
         Use get_sub_info() instead for a signed/downloadable URL.
         """
         url = f"{self.base_url}/courseapi/v3/multi-search/get-sub-detail"
-        resp = self.vpn.get(url, params={
+        data = self.get_json(url, params={
             "course_id": course_id, "sub_id": sub_id
         })
-        resp.raise_for_status()
-        data = resp.json()
 
         if data.get("code") != 0:
             raise RuntimeError(
@@ -511,11 +538,9 @@ class ICourseClient:
             f"{self.base_url}"
             f"/courseapi/v3/portal-home-setting/get-sub-info"
         )
-        resp = self.vpn.get(url, params={
+        data = self.get_json(url, params={
             "course_id": course_id, "sub_id": sub_id
         })
-        resp.raise_for_status()
-        data = resp.json()
         payload = data.get("data") or {}
 
         if data.get("code") != 0 and not payload:
@@ -543,11 +568,9 @@ class ICourseClient:
                 f"{self.base_url}"
                 f"/courseapi/v3/portal-home-setting/get-sub-info"
             )
-            resp = self.vpn.get(url, params={
+            data = self.get_json(url, params={
                 "course_id": course_id, "sub_id": sub_id
             })
-            resp.raise_for_status()
-            data = resp.json()
             if data.get("code") == 7001:
                 return True
             msg = str(data.get("msg") or "")

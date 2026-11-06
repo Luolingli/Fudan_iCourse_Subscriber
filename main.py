@@ -56,6 +56,12 @@ def login_with_retry(max_attempts: int = 10) -> WebVPNSession:
                 raise
 
 
+def _relogin(client: ICourseClient) -> None:
+    print("[Session] WebVPN session expired, re-logging in...", flush=True)
+    client.vpn = login_with_retry()
+    client._userinfo = None
+
+
 def _check_session(client: ICourseClient) -> None:
     """Verify WebVPN session; re-login in place if expired.
 
@@ -64,9 +70,7 @@ def _check_session(client: ICourseClient) -> None:
     """
     if client.check_alive():
         return
-    print("[Session] WebVPN session expired, re-logging in...")
-    client.vpn = login_with_retry()
-    client._userinfo = None
+    _relogin(client)
 
 
 def _enumerate_lectures(client: ICourseClient, db: Database,
@@ -1198,7 +1202,7 @@ def run():
     ) else None
 
     vpn = login_with_retry()
-    client = ICourseClient(vpn)
+    client = ICourseClient(vpn, session_refresh_cb=lambda: _relogin(client))
 
     if config.DIAG_SOURCE_IDS:
         # Read-only forensics mode: object identity per video URL across
