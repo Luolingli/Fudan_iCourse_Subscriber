@@ -184,13 +184,19 @@ class WebVPNSession:
         print("[*] Starting iCourse CAS authentication through WebVPN...")
 
         # Pre-flight: probe the WebVPN portal.  A cold session redirects to
-        # /login instantly (status 302); a hot session returns 200.  Fail
-        # fast on cold — login_with_retry() in main.py will re-login.
+        # /login instantly (status 302); a hot session returns 200 or redirects
+        # to /portal/. Fail fast on cold — login_with_retry() in main.py will re-login.
         warmup = self.session.get(
-            config.WEBVPN_BASE + "/", allow_redirects=False, timeout=5,
+            config.WEBVPN_BASE + "/", allow_redirects=False, timeout=15,
         )
         if warmup.status_code != 200:
-            raise RuntimeError("WebVPN session cold — re-login needed")
+            loc = warmup.headers.get("Location", "")
+            if warmup.status_code in (301, 302) and "login" not in loc.lower():
+                print(f"    WebVPN portal redirected to {loc} (hot session)")
+            else:
+                raise RuntimeError(
+                    f"WebVPN session cold (status={warmup.status_code}, location={loc}) — re-login needed"
+                )
 
         idp_vpn_base = get_vpn_url(config.IDP_BASE)
 
@@ -225,6 +231,13 @@ class WebVPNSession:
             )
 
         entity_id = config.ICOURSE_BASE
+        for source in [resp.url] + [
+            h.headers.get("Location", "") for h in (resp.history or [])
+        ]:
+            m = re.search(r'entityId=([^&#"]+)', source)
+            if m:
+                entity_id = m.group(1)
+                break
         print("    lck: OK")
 
         # Step 2: Query auth methods (through WebVPN)
@@ -300,12 +313,18 @@ class WebVPNSession:
 
         if str(data.get("code")) != "200":
             raise RuntimeError(
-                f"iCourse CAS auth failed (code={data.get('code')})"
+                f"iCourse CAS auth failed: code={data.get('code')}, msg={data.get('message') or data.get('msg')}, data={data}"
             )
 
-        login_token = data.get("loginToken", "")
+        login_token = data.get("loginToken") or (
+            data.get("data") if isinstance(data.get("data"), str)
+            else (data.get("data", {}).get("loginToken") if isinstance(data.get("data"), dict) else None)
+        )
         if not login_token:
-            raise RuntimeError("No loginToken in iCourse CAS response")
+            raise RuntimeError(
+                f"No loginToken in iCourse CAS response: code={data.get('code')}, "
+                f"msg={data.get('message') or data.get('msg')}, keys={list(data.keys())}, data={data}"
+            )
         print("    loginToken: OK")
 
         # Step 6: Get CAS ticket (through WebVPN)
@@ -524,13 +543,19 @@ class WebVPNSession:
 
         if str(data.get("code")) != "200":
             raise RuntimeError(
-                f"Authentication failed (code={data.get('code')})"
+                f"Authentication failed: code={data.get('code')}, msg={data.get('message') or data.get('msg')}, data={data}"
             )
 
-        # loginToken is at top level, not nested under "data"
-        login_token = data.get("loginToken", "")
+        # loginToken may be at top level or nested under data
+        login_token = data.get("loginToken") or (
+            data.get("data") if isinstance(data.get("data"), str)
+            else (data.get("data", {}).get("loginToken") if isinstance(data.get("data"), dict) else None)
+        )
         if not login_token:
-            raise RuntimeError("No loginToken in response")
+            raise RuntimeError(
+                f"No loginToken in response: code={data.get('code')}, "
+                f"msg={data.get('message') or data.get('msg')}, keys={list(data.keys())}, data={data}"
+            )
 
         print("    loginToken: OK")
         return login_token
@@ -574,26 +599,32 @@ class WebVPNSession:
 
     def _establish_session(self, ticket_url: str):
         """Step 7: Follow the ticket URL to establish WebVPN session."""
-        for attempt in range(3):
-            try:
-                resp = self.session.get(
-                    ticket_url, allow_redirects=True, timeout=20
-                )
-                if resp.status_code == 200:
-                    print("    Session established.")
-                    return
-                raise RuntimeError(
-                    f"Failed to establish WebVPN session (status={resp.status_code})"
-                )
-            except requests.exceptions.Timeout:
-                has_ticket = any(
-                    "wengine_vpn_ticket" in c.name
-                    for c in self.session.cookies
-                )
-                if has_ticket:
-                    print("    Session cookie set despite timeout.")
-                    return
-                if attempt < 2:
-                    print(f"    Timeout, retrying ({attempt + 2}/3)...")
-                    continue
-                raise
+        try:
+            resp = self.session.get(
+                ticket_url, allow_redirects=True, timeout=60
+            )
+            has_ticket = any(
+                "wengine_vpn_ticket" in c.name or "vpn" in c.name.lower()
+                for c in self.session.cookies
+            )
+            if resp.status_code == 200:
+                if "login" in resp.url.lower() and not has_ticket:
+                    raise RuntimeError(
+                        f"Ticket validation rejected, redirected to login page: {resp.url}"
+                    )
+                print("    Session established.")
+                return
+            raise RuntimeError(
+                f"Failed to establish WebVPN session (status={resp.status_code}, url={resp.url})"
+            )
+        except requests.exceptions.Timeout:
+            has_ticket = any(
+                "wengine_vpn_ticket" in c.name or "vpn" in c.name.lower()
+                for c in self.session.cookies
+            )
+            if has_ticket:
+                print("    Session cookie set despite timeout.")
+                return
+            raise RuntimeError(
+                "Timeout establishing WebVPN session (ticket cannot be retried)"
+            )
