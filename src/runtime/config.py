@@ -13,6 +13,7 @@ socket.getaddrinfo = _patched_getaddrinfo
 
 STUDENT_ID = os.environ.get("StuId", "")
 PASSWORD = os.environ.get("UISPsw", "")
+TOTP_SECRET = os.environ.get("UIS_TOTP_SECRET", "").strip()
 
 WEBVPN_BASE = "https://webvpn.fudan.edu.cn"
 IDP_BASE = "https://id.fudan.edu.cn"
