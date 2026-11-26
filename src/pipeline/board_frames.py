@@ -182,23 +182,30 @@ def extract_board_pages(
     # observed), and the union across attempts converges on the whole
     # lecture. The LLM then summarizes the current best cover; nothing
     # hinges on one download being complete.
+    done_ct = 0
     if total_rows and not pending and done:
         done_ct, cover_s = db.get_board_coverage(sub_id, BOARD_PAGE_NUM_BASE)
-        if not duration_hint_s or cover_s >= 0.9 * float(duration_hint_s):
+        has_adequate_cover = (
+            done_ct > 0 and (
+                cover_s >= 0.9 * float(duration_hint_s)
+                if duration_hint_s else cover_s >= 3600
+            )
+        )
+        if has_adequate_cover:
             if reporter:
                 reporter.info(
-                    f"    [Board] cover frontier {cover_s}s of "
+                    f"    [Board] cover frontier {cover_s}s ({done_ct} with text) of "
                     f"{int(duration_hint_s) if duration_hint_s else '?'}s"
                     f" — skipping extraction."
                 )
             return done
         if reporter:
             reporter.info(
-                f"    [Board] cover only {cover_s}s of "
-                f"{int(duration_hint_s)}s — re-extracting to extend the "
+                f"    [Board] cover only {cover_s}s ({done_ct} with text) of "
+                f"{int(duration_hint_s) if duration_hint_s else '?'}s — re-extracting to extend the "
                 f"open cover (new depth fills untouched page slots only)."
             )
-    if total_rows and not pending and not done:
+    if total_rows and not pending and (not done or not done_ct):
         # Previous attempt ended with nothing usable (all failed/invalid or
         # empty-text "done") — e.g. a force_reset race where the platform
         # PPT pipeline "fetched" our videoframe pseudo-URLs and marked them
@@ -259,10 +266,16 @@ def extract_board_pages(
                     for n in os.listdir(frame_dir)
                     if n.endswith(".jpg")
                 ) if os.path.isdir(frame_dir) else []
-        if not frames:
+        if not frames or len(frames) < 10:
+            if reporter and frames:
+                reporter.info(
+                    f"    [Board] only {len(frames)} frames from file — streaming sample "
+                    f"for full coverage..."
+                )
             vpn_url, headers = client.get_stream_params(video_url)
-            frames = _sample_frames(vpn_url, frame_dir, interval, reporter,
-                                    headers)
+            stream_frames = _sample_frames(vpn_url, frame_dir, interval, reporter,
+                                          headers)
+            frames = sorted(set((frames or []) + stream_frames))
         if not frames:
             return 0
         if reporter:

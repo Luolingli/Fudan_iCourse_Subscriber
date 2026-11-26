@@ -875,6 +875,17 @@ class ICourseClient:
                             mode = "ab"
                         elif cl:
                             total = int(cl)
+                        elif not total and resp.headers.get("etag"):
+                            import re as _re
+                            m = _re.search(
+                                r'-([0-9a-fA-F]{4,})"?$',
+                                resp.headers.get("etag", "").strip(),
+                            )
+                            if m:
+                                try:
+                                    total = int(m.group(1), 16)
+                                except ValueError:
+                                    pass
                         if not ident_logged:
                             # Object identity for egress forensics (etag
                             # hex tail == byte size; browser truth sample
@@ -899,8 +910,7 @@ class ICourseClient:
                             have2 = (os.path.getsize(output_path)
                                      if os.path.exists(output_path)
                                      else 0)
-                            complete_now = have2 > 0 and (
-                                not total or have2 >= total)
+                            complete_now = have2 > 0 and bool(total) and have2 >= total
                 finally:
                     try:
                         resp.close()
